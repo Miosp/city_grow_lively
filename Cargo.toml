@@ -3,9 +3,18 @@ name = "city_grow_rs"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+anyhow = "1.0.102"
+rand = "0.10.0"
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = "0.3.22"
+windows-numerics = "0.3.1"
+
 [dependencies.windows]
 version = "0.62.2"
 features = [
+    "Foundation_Numerics",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
