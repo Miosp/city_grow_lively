@@ -524,10 +524,59 @@ impl AppState {
             }
         }
     }
-}
 
-thread_local! {
-    static STATE: std::cell::RefCell<AppState> = std::cell::RefCell::new(AppState::new());
+    // Handle window messages
+    unsafe fn handle_message(
+        &mut self,
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                unsafe {
+                    let _ = ValidateRect(Some(hwnd), None);
+                }
+                if self.init(hwnd) {
+                    self.render();
+                }
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                if self.init(hwnd) {
+                    self.render();
+                }
+                LRESULT(0)
+            }
+            WM_SIZE => {
+                // Reset to reinitialize with new size (including Direct2D and DirectComposition objects)
+                self.initialized = false;
+                self.brush = None;
+                self.text_format = None;
+                self.dwrite_factory = None;
+                self.d2d_bitmap = None;
+                self.d2d_context = None;
+                self.d2d_device = None;
+                self.d2d_factory = None;
+                self.composition_visual = None;
+                self.composition_target = None;
+                self.composition_device = None;
+                self.swap_chain = None;
+                self.d3d_context = None;
+                self.d3d_device = None;
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                unsafe {
+                    PostQuitMessage(0);
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => LRESULT(0), // Let host handle lifecycle
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -652,6 +701,10 @@ fn main() -> Result<()> {
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
         let screen_height = GetSystemMetrics(SM_CYSCREEN);
 
+        // Create AppState on heap and pass pointer through lpParam
+        let app_state = Box::new(AppState::new());
+        let app_state_ptr = Box::into_raw(app_state);
+
         let hwnd = CreateWindowExW(
             ex_style,
             window_class,
@@ -664,7 +717,7 @@ fn main() -> Result<()> {
             parent,
             None,
             Some(instance.into()),
-            None,
+            Some(app_state_ptr as *const _),
         )?;
 
         log(&format!("window created: {:?}", hwnd.0));
@@ -705,62 +758,39 @@ fn main() -> Result<()> {
             DispatchMessageW(&msg);
         }
 
+        // Clean up: retrieve and drop the AppState
+        let app_state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
+        if !app_state_ptr.is_null() {
+            let _ = Box::from_raw(app_state_ptr);
+            log("AppState cleaned up");
+        }
+
         log("exiting");
         Ok(())
     }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            unsafe {
-                let _ = ValidateRect(Some(hwnd), None);
-            }
-            STATE.with(|state| {
-                let mut s = state.borrow_mut();
-                if s.init(hwnd) {
-                    s.render();
-                }
-            });
-            LRESULT(0)
+    // Special handling for WM_NCCREATE to store AppState pointer
+    if msg == WM_NCCREATE {
+        unsafe {
+            let create_struct = lparam.0 as *const CREATESTRUCTW;
+            let app_state_ptr = (*create_struct).lpCreateParams as isize;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_state_ptr);
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
-        WM_TIMER => {
-            STATE.with(|state| {
-                let mut s = state.borrow_mut();
-                if s.init(hwnd) {
-                    s.render();
-                }
-            });
-            LRESULT(0)
+    }
+
+    unsafe {
+        // Retrieve AppState pointer from window user data
+        let app_state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
+
+        if !app_state_ptr.is_null() {
+            let app_state = &mut *app_state_ptr;
+            app_state.handle_message(hwnd, msg, wparam, lparam)
+        } else {
+            // Before WM_NCCREATE or if something went wrong
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        WM_SIZE => {
-            STATE.with(|state| {
-                let mut s = state.borrow_mut();
-                // Reset to reinitialize with new size (including Direct2D and DirectComposition objects)
-                s.initialized = false;
-                s.brush = None;
-                s.text_format = None;
-                s.dwrite_factory = None;
-                s.d2d_bitmap = None;
-                s.d2d_context = None;
-                s.d2d_device = None;
-                s.d2d_factory = None;
-                s.composition_visual = None;
-                s.composition_target = None;
-                s.composition_device = None;
-                s.swap_chain = None;
-                s.d3d_context = None;
-                s.d3d_device = None;
-            });
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            unsafe {
-                PostQuitMessage(0);
-            }
-            LRESULT(0)
-        }
-        WM_CLOSE => LRESULT(0), // Let host handle lifecycle
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
