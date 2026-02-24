@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use windows::{
     Win32::{
-        Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         Graphics::Gdi::ValidateRect,
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::*,

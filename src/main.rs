@@ -1,16 +1,17 @@
 #![windows_subsystem = "windows"]
 
 use anyhow::{Context, Result};
-use tracing::info;
+use app::App;
+use tracing::{debug, info};
+use window::Window;
+
+use crate::city_grow::CityGrowScene;
 
 mod app;
+mod city_grow;
 mod renderer;
 mod scene;
 mod window;
-
-use app::App;
-use scene::CityGrowScene;
-use window::Window;
 
 fn main() -> Result<()> {
     // Get log path next to the executable
@@ -28,11 +29,11 @@ fn main() -> Result<()> {
         .with_target(false)
         .with_level(true)
         .with_line_number(true)
-        .with_max_level(tracing::Level::DEBUG)
+        // .with_max_level(tracing::Level::DEBUG)
         .init();
 
     info!("Starting City Grow application");
-    info!(
+    debug!(
         "Log file location: {}",
         log_dir.join("city_grow.log").display()
     );
@@ -45,7 +46,7 @@ fn main() -> Result<()> {
     // Create window (backend)
     let _window = Window::create("City Grow", app).context("Failed to create window")?;
 
-    info!("Entering message loop");
+    debug!("Entering message loop");
 
     // Run message loop
     let result = Window::run_message_loop().context("Message loop failed");
