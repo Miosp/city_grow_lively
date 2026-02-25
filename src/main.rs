@@ -2,19 +2,36 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
+use std::time::Instant;
 use windows::{
     Win32::{
         Foundation::*,
         Graphics::{
+            Direct2D::{
+                Common::{
+                    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+                },
+                D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+                D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device,
+                ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+            },
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0},
             Direct3D11::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
-                ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+                ID3D11Device, ID3D11DeviceContext,
             },
             DirectComposition::{
                 DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget,
                 IDCompositionVisual,
+            },
+            DirectWrite::{
+                DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory, IDWriteFactory,
+                IDWriteTextFormat,
             },
             Dxgi::{
                 Common::{
@@ -22,7 +39,7 @@ use windows::{
                 },
                 DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
                 DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
-                IDXGIFactory2, IDXGISwapChain1,
+                IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
             },
             Gdi::ValidateRect,
         },
@@ -53,30 +70,44 @@ fn log(msg: &str) {
 }
 
 struct AppState {
-    device: Option<ID3D11Device>,
-    context: Option<ID3D11DeviceContext>,
+    d3d_device: Option<ID3D11Device>,
+    d3d_context: Option<ID3D11DeviceContext>,
+    d2d_factory: Option<ID2D1Factory1>,
+    d2d_device: Option<ID2D1Device>,
+    d2d_context: Option<ID2D1DeviceContext>,
+    d2d_bitmap: Option<ID2D1Bitmap1>,
+    dwrite_factory: Option<IDWriteFactory>,
+    text_format: Option<IDWriteTextFormat>,
+    brush: Option<ID2D1SolidColorBrush>,
     swap_chain: Option<IDXGISwapChain1>,
-    render_target_view: Option<ID3D11RenderTargetView>,
     composition_device: Option<IDCompositionDevice>,
     composition_target: Option<IDCompositionTarget>,
     composition_visual: Option<IDCompositionVisual>,
     render_count: u32,
     initialized: bool,
+    start_time: Instant,
 }
 
 impl AppState {
     fn new() -> Self {
         log("AppState::new()");
         Self {
-            device: None,
-            context: None,
+            d3d_device: None,
+            d3d_context: None,
+            d2d_factory: None,
+            d2d_device: None,
+            d2d_context: None,
+            d2d_bitmap: None,
+            dwrite_factory: None,
+            text_format: None,
+            brush: None,
             swap_chain: None,
-            render_target_view: None,
             composition_device: None,
             composition_target: None,
             composition_visual: None,
             render_count: 0,
             initialized: false,
+            start_time: Instant::now(),
         }
     }
 
@@ -85,12 +116,12 @@ impl AppState {
             return true;
         }
 
-        log("init: creating D3D11 device with DirectComposition support");
+        log("init: creating D3D11 device with Direct2D and DirectComposition support");
         unsafe {
             let width = GetSystemMetrics(SM_CXSCREEN) as u32;
             let height = GetSystemMetrics(SM_CYSCREEN) as u32;
 
-            // Step 1: Create D3D11 device separately with BGRA support (required for DirectComposition)
+            // Step 1: Create D3D11 device (Direct2D requires this underneath)
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
             let mut feature_level = D3D_FEATURE_LEVEL_11_0;
@@ -112,13 +143,13 @@ impl AppState {
                 return false;
             }
 
-            self.device = device;
-            self.context = context;
+            self.d3d_device = device;
+            self.d3d_context = context;
 
             log("init: D3D11 device created successfully");
 
             // Step 2: Get DXGI device from D3D11 device
-            let Some(ref d3d_device) = self.device else {
+            let Some(ref d3d_device) = self.d3d_device else {
                 log("init: D3D11 device is None");
                 return false;
             };
@@ -133,7 +164,45 @@ impl AppState {
 
             log("init: Got IDXGIDevice");
 
-            // Step 3: Get adapter from DXGI device
+            // Step 3: Create Direct2D factory
+            let d2d_factory: ID2D1Factory1 =
+                match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
+                    Ok(factory) => factory,
+                    Err(e) => {
+                        log(&format!("init: D2D1CreateFactory failed: {:?}", e));
+                        return false;
+                    }
+                };
+
+            self.d2d_factory = Some(d2d_factory.clone());
+            log("init: Direct2D factory created");
+
+            // Step 4: Create Direct2D device from DXGI device
+            let d2d_device: ID2D1Device = match d2d_factory.CreateDevice(&dxgi_device) {
+                Ok(dev) => dev,
+                Err(e) => {
+                    log(&format!("init: CreateDevice (D2D) failed: {:?}", e));
+                    return false;
+                }
+            };
+
+            self.d2d_device = Some(d2d_device.clone());
+            log("init: Direct2D device created");
+
+            // Step 5: Create Direct2D device context
+            let d2d_context: ID2D1DeviceContext =
+                match d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        log(&format!("init: CreateDeviceContext (D2D) failed: {:?}", e));
+                        return false;
+                    }
+                };
+
+            self.d2d_context = Some(d2d_context.clone());
+            log("init: Direct2D device context created");
+
+            // Step 6: Get adapter from DXGI device
             let adapter = match dxgi_device.GetAdapter() {
                 Ok(a) => a,
                 Err(e) => {
@@ -144,7 +213,7 @@ impl AppState {
 
             log("init: Got IDXGIAdapter");
 
-            // Step 4: Get DXGI factory from adapter
+            // Step 7: Get DXGI factory from adapter
             let factory: IDXGIFactory2 = match adapter.GetParent() {
                 Ok(f) => f,
                 Err(e) => {
@@ -155,7 +224,7 @@ impl AppState {
 
             log("init: Got IDXGIFactory2");
 
-            // Step 5: Create composition swap chain (windowless)
+            // Step 8: Create composition swap chain (windowless)
             let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -188,7 +257,100 @@ impl AppState {
             self.swap_chain = Some(swap_chain.clone());
             log("init: Composition swap chain created");
 
-            // Step 6: Create DirectComposition device
+            // Step 9: Create Direct2D bitmap from swap chain back buffer
+            let dxgi_surface: IDXGISurface = match swap_chain.GetBuffer(0) {
+                Ok(surface) => surface,
+                Err(e) => {
+                    log(&format!("init: GetBuffer (surface) failed: {:?}", e));
+                    return false;
+                }
+            };
+
+            let bitmap_properties = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                colorContext: ManuallyDrop::new(None),
+            };
+
+            let d2d_bitmap: ID2D1Bitmap1 = match d2d_context
+                .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bitmap_properties))
+            {
+                Ok(bmp) => bmp,
+                Err(e) => {
+                    log(&format!(
+                        "init: CreateBitmapFromDxgiSurface failed: {:?}",
+                        e
+                    ));
+                    return false;
+                }
+            };
+
+            self.d2d_bitmap = Some(d2d_bitmap.clone());
+            d2d_context.SetTarget(&d2d_bitmap);
+            log("init: Direct2D bitmap created and set as target");
+
+            // Step 10: Create DirectWrite factory for text rendering
+            let dwrite_factory: IDWriteFactory =
+                match DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) {
+                    Ok(factory) => factory,
+                    Err(e) => {
+                        log(&format!("init: DWriteCreateFactory failed: {:?}", e));
+                        return false;
+                    }
+                };
+
+            self.dwrite_factory = Some(dwrite_factory.clone());
+            log("init: DirectWrite factory created");
+
+            // Step 11: Create text format for rendering
+            let text_format: IDWriteTextFormat = match dwrite_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                48.0,
+                w!("en-us"),
+            ) {
+                Ok(format) => format,
+                Err(e) => {
+                    log(&format!("init: CreateTextFormat failed: {:?}", e));
+                    return false;
+                }
+            };
+
+            let _ = text_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = text_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            self.text_format = Some(text_format);
+            log("init: Text format created");
+
+            // Step 12: Create a solid color brush for drawing
+            let brush: ID2D1SolidColorBrush = match d2d_context.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.8,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                None,
+            ) {
+                Ok(brush) => brush,
+                Err(e) => {
+                    log(&format!("init: CreateSolidColorBrush failed: {:?}", e));
+                    return false;
+                }
+            };
+
+            self.brush = Some(brush);
+            log("init: Solid color brush created");
+
+            // Step 13: Create DirectComposition device
             let composition_device: IDCompositionDevice =
                 match DCompositionCreateDevice(&dxgi_device) {
                     Ok(dev) => dev,
@@ -201,7 +363,7 @@ impl AppState {
             self.composition_device = Some(composition_device.clone());
             log("init: DirectComposition device created");
 
-            // Step 7: Create composition target for the window
+            // Step 14: Create composition target for the window
             let composition_target: IDCompositionTarget =
                 match composition_device.CreateTargetForHwnd(hwnd, true) {
                     Ok(target) => target,
@@ -214,7 +376,7 @@ impl AppState {
             self.composition_target = Some(composition_target.clone());
             log("init: Composition target created");
 
-            // Step 8: Create composition visual
+            // Step 15: Create composition visual
             let composition_visual: IDCompositionVisual = match composition_device.CreateVisual() {
                 Ok(visual) => visual,
                 Err(e) => {
@@ -226,7 +388,7 @@ impl AppState {
             self.composition_visual = Some(composition_visual.clone());
             log("init: Composition visual created");
 
-            // Step 9: Set swap chain as visual content
+            // Step 16: Set swap chain as visual content
             if let Err(e) = composition_visual.SetContent(&swap_chain) {
                 log(&format!("init: SetContent failed: {:?}", e));
                 return false;
@@ -234,7 +396,7 @@ impl AppState {
 
             log("init: Swap chain set as visual content");
 
-            // Step 10: Set visual as root of composition target
+            // Step 17: Set visual as root of composition target
             if let Err(e) = composition_target.SetRoot(&composition_visual) {
                 log(&format!("init: SetRoot failed: {:?}", e));
                 return false;
@@ -242,7 +404,7 @@ impl AppState {
 
             log("init: Visual set as composition root");
 
-            // Step 11: Commit composition changes to DWM
+            // Step 18: Commit composition changes to DWM
             if let Err(e) = composition_device.Commit() {
                 log(&format!("init: Commit failed: {:?}", e));
                 return false;
@@ -250,34 +412,10 @@ impl AppState {
 
             log("init: Composition committed to DWM");
 
-            // Step 12: Create render target view
-            if let Some(ref sc) = self.swap_chain {
-                match sc.GetBuffer::<ID3D11Texture2D>(0) {
-                    Ok(back_buffer) => {
-                        let mut rtv: Option<ID3D11RenderTargetView> = None;
-                        match d3d_device.CreateRenderTargetView(&back_buffer, None, Some(&mut rtv))
-                        {
-                            Ok(()) => {
-                                self.render_target_view = rtv;
-                                log("init: Render target view created");
-                            }
-                            Err(e) => {
-                                log(&format!("init: CreateRenderTargetView failed: {:?}", e));
-                                return false;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log(&format!("init: GetBuffer failed: {:?}", e));
-                        return false;
-                    }
-                }
-            }
-
             self.initialized = true;
 
             log(&format!(
-                "init: DirectComposition initialization complete, feature level: {:?}",
+                "init: Direct2D + DirectComposition initialization complete, feature level: {:?}",
                 feature_level
             ));
             true
@@ -290,15 +428,84 @@ impl AppState {
         }
 
         unsafe {
-            if let (Some(ctx), Some(sc), Some(rtv), Some(comp_dev)) = (
-                &self.context,
+            if let (Some(d2d_ctx), Some(sc), Some(brush), Some(text_fmt), Some(comp_dev)) = (
+                &self.d2d_context,
                 &self.swap_chain,
-                &self.render_target_view,
+                &self.brush,
+                &self.text_format,
                 &self.composition_device,
             ) {
-                // Clear the back buffer with a dark blue/purple color
-                let color = [0.1f32, 0.1, 0.2, 1.0];
-                ctx.ClearRenderTargetView(rtv, &color);
+                // Begin Direct2D drawing
+                d2d_ctx.BeginDraw();
+
+                // Clear with dark blue/purple background (matching original D3D11 version)
+                d2d_ctx.Clear(Some(&D2D1_COLOR_F {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.2,
+                    a: 1.0,
+                }));
+
+                // Get window dimensions for animation
+                let width = GetSystemMetrics(SM_CXSCREEN) as f32;
+                let height = GetSystemMetrics(SM_CYSCREEN) as f32;
+
+                // Time-based animation: bouncing circle
+                let elapsed = self.start_time.elapsed();
+                let time_sec = elapsed.as_secs_f32();
+
+                // Animated circle position (bouncing around screen)
+                let x = (time_sec.sin() * 0.4 + 0.5) * width;
+                let y = ((time_sec * 1.3).cos() * 0.4 + 0.5) * height;
+
+                // Animated circle radius (pulsing)
+                let base_radius = width.min(height) * 0.1;
+                let radius = base_radius * (1.0 + (time_sec * 2.0).sin() * 0.3);
+
+                // Animated circle color (shifting hues)
+                let r = (time_sec * 0.5).sin() * 0.5 + 0.5;
+                let g = ((time_sec * 0.5) + 2.0).sin() * 0.5 + 0.5;
+                let b = ((time_sec * 0.5) + 4.0).sin() * 0.5 + 0.5;
+
+                brush.SetColor(&D2D1_COLOR_F { r, g, b, a: 0.8 });
+
+                // Draw filled ellipse
+                let mut ellipse = D2D1_ELLIPSE::default();
+                ellipse.point.X = x;
+                ellipse.point.Y = y;
+                ellipse.radiusX = radius;
+                ellipse.radiusY = radius;
+                d2d_ctx.FillEllipse(&ellipse, brush);
+
+                // Draw text
+                brush.SetColor(&D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+
+                let text = "City Grow - Windows 25H2\nDirect2D + DirectComposition";
+                let text_wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+
+                let text_rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: height * 0.85,
+                    right: width,
+                    bottom: height,
+                };
+
+                d2d_ctx.DrawText(
+                    &text_wide,
+                    text_fmt,
+                    &text_rect,
+                    brush,
+                    Default::default(),
+                    Default::default(),
+                );
+
+                // End Direct2D drawing
+                let _ = d2d_ctx.EndDraw(None, None);
 
                 // Present the frame
                 let _ = sc.Present(1, DXGI_PRESENT(0));
@@ -529,15 +736,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_SIZE => {
             STATE.with(|state| {
                 let mut s = state.borrow_mut();
-                // Reset to reinitialize with new size (including DirectComposition objects)
+                // Reset to reinitialize with new size (including Direct2D and DirectComposition objects)
                 s.initialized = false;
-                s.render_target_view = None;
+                s.brush = None;
+                s.text_format = None;
+                s.dwrite_factory = None;
+                s.d2d_bitmap = None;
+                s.d2d_context = None;
+                s.d2d_device = None;
+                s.d2d_factory = None;
                 s.composition_visual = None;
                 s.composition_target = None;
                 s.composition_device = None;
                 s.swap_chain = None;
-                s.context = None;
-                s.device = None;
+                s.d3d_context = None;
+                s.d3d_device = None;
             });
             LRESULT(0)
         }
