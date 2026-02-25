@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use derive_builder::Builder;
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -6,8 +7,34 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::*,
     },
-    core::w,
+    core::{PCWSTR, w},
 };
+
+const WINDOW_CLASS_NAME: PCWSTR = w!("CityGrowWindow");
+const DEFAULT_TIMER_ID: usize = 1;
+const DEFAULT_FRAME_INTERVAL_MS: u32 = 16; // ~60fps
+const DEFAULT_WINDOW_WIDTH: u32 = 1280;
+const DEFAULT_WINDOW_HEIGHT: u32 = 720;
+
+/// Extract low-order word from LPARAM
+#[inline]
+fn loword(lparam: LPARAM) -> u16 {
+    (lparam.0 & 0xFFFF) as u16
+}
+
+/// Extract high-order word from LPARAM
+#[inline]
+fn hiword(lparam: LPARAM) -> u16 {
+    ((lparam.0 >> 16) & 0xFFFF) as u16
+}
+
+/// Configuration for window creation
+#[derive(Builder)]
+pub struct WindowConfig {
+    pub title: String,
+    #[builder(default = false)]
+    pub fullscreen: bool,
+}
 
 /// Trait for handling window events
 pub trait WindowHandler {
@@ -24,21 +51,53 @@ pub trait WindowHandler {
     fn on_destroy(&mut self);
 }
 
+/// Handle WM_PAINT message
+fn handle_paint<H: WindowHandler>(handler: &mut H, hwnd: HWND) -> LRESULT {
+    unsafe {
+        let _ = ValidateRect(Some(hwnd), None);
+    }
+    handler.on_paint(hwnd);
+    LRESULT(0)
+}
+
+/// Handle WM_TIMER message
+fn handle_timer<H: WindowHandler>(handler: &mut H, hwnd: HWND) -> LRESULT {
+    handler.on_timer(hwnd);
+    LRESULT(0)
+}
+
+/// Handle WM_SIZE message
+fn handle_size<H: WindowHandler>(handler: &mut H, hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let width = loword(lparam) as u32;
+    let height = hiword(lparam) as u32;
+    handler.on_resize(hwnd, width, height);
+    LRESULT(0)
+}
+
+/// Handle WM_DESTROY message
+fn handle_destroy<H: WindowHandler>(handler: &mut H, handler_ptr: *mut H) -> LRESULT {
+    handler.on_destroy();
+    unsafe {
+        PostQuitMessage(0);
+        let _ = Box::from_raw(handler_ptr);
+    }
+    LRESULT(0)
+}
 /// Window wrapper that manages Win32 window lifecycle
 pub struct Window {
     hwnd: HWND,
 }
 
 impl Window {
-    /// Create a new window with the given handler
-    pub fn create<H: WindowHandler + 'static>(title: &str, handler: H) -> Result<Self> {
+    /// Create a new window with the given configuration and handler
+    pub fn create<H: WindowHandler + 'static>(config: WindowConfig, handler: H) -> Result<Self> {
         unsafe {
             let instance = GetModuleHandleW(None).context("Failed to get module handle")?;
 
             // Register window class
             let wc = WNDCLASSW {
                 hInstance: instance.into(),
-                lpszClassName: w!("CityGrowWindow"),
+                lpszClassName: WINDOW_CLASS_NAME,
                 lpfnWndProc: Some(Self::wndproc::<H>),
                 style: CS_HREDRAW | CS_VREDRAW,
                 hCursor: LoadCursorW(None, IDC_ARROW).context("Failed to load cursor")?,
@@ -47,39 +106,63 @@ impl Window {
 
             RegisterClassW(&wc); // Ignore error if already registered
 
-            // Determine window style based on context
-            let style = WS_POPUP | WS_VISIBLE;
-            let ex_style = WINDOW_EX_STYLE::default();
-            let parent = None;
-
-            let screen_width = GetSystemMetrics(SM_CXSCREEN);
-            let screen_height = GetSystemMetrics(SM_CYSCREEN);
+            // Determine window style and dimensions based on config
+            let (style, ex_style, width, height, x, y) = if config.fullscreen {
+                let screen_width = GetSystemMetrics(SM_CXSCREEN);
+                let screen_height = GetSystemMetrics(SM_CYSCREEN);
+                (
+                    WS_POPUP | WS_VISIBLE,
+                    WINDOW_EX_STYLE::default(),
+                    screen_width,
+                    screen_height,
+                    0,
+                    0,
+                )
+            } else {
+                (
+                    WS_OVERLAPPEDWINDOW,
+                    WINDOW_EX_STYLE::default(),
+                    DEFAULT_WINDOW_WIDTH as i32,
+                    DEFAULT_WINDOW_HEIGHT as i32,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                )
+            };
 
             // Box the handler on the heap to pass through lpParam
             let handler_ptr = Box::into_raw(Box::new(handler));
 
-            let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let title_wide: Vec<u16> = config
+                .title
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
             let hwnd = CreateWindowExW(
                 ex_style,
-                w!("CityGrowWindow"),
+                WINDOW_CLASS_NAME,
                 windows::core::PCWSTR::from_raw(title_wide.as_ptr()),
                 style,
-                0,
-                0,
-                screen_width,
-                screen_height,
-                parent,
+                x,
+                y,
+                width,
+                height,
+                None,
                 None,
                 Some(instance.into()),
                 Some(handler_ptr as *const _),
             )
             .context("Failed to create window")?;
 
-            ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_SHOW);
 
-            // Start 60fps timer
-            SetTimer(Some(hwnd), 1, 16, None);
+            // Start frame timer
+            SetTimer(
+                Some(hwnd),
+                DEFAULT_TIMER_ID,
+                DEFAULT_FRAME_INTERVAL_MS,
+                None,
+            );
 
             Ok(Self { hwnd })
         }
@@ -101,6 +184,16 @@ impl Window {
         }
     }
 
+    /// Handle WM_NCCREATE to store handler pointer
+    fn handle_nccreate<H: WindowHandler>(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+        unsafe {
+            let create_struct = lparam.0 as *const CREATESTRUCTW;
+            let handler_ptr = (*create_struct).lpCreateParams as isize;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, handler_ptr);
+            DefWindowProcW(hwnd, WM_NCCREATE, WPARAM(0), lparam)
+        }
+    }
+
     /// Generic window procedure that routes messages to handler
     unsafe extern "system" fn wndproc<H: WindowHandler>(
         hwnd: HWND,
@@ -110,52 +203,25 @@ impl Window {
     ) -> LRESULT {
         // Store handler pointer on WM_NCCREATE
         if msg == WM_NCCREATE {
-            unsafe {
-                let create_struct = lparam.0 as *const CREATESTRUCTW;
-                let handler_ptr = (*create_struct).lpCreateParams as isize;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, handler_ptr);
-                return DefWindowProcW(hwnd, msg, wparam, lparam);
-            }
+            return Self::handle_nccreate::<H>(hwnd, lparam);
         }
 
-        unsafe {
-            // Retrieve handler pointer
-            let handler_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut H;
+        // Retrieve handler pointer
+        let handler_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut H };
 
-            if !handler_ptr.is_null() {
-                let handler = &mut *handler_ptr;
+        if handler_ptr.is_null() {
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
 
-                match msg {
-                    WM_PAINT => {
-                        let _ = ValidateRect(Some(hwnd), None);
-                        handler.on_paint(hwnd);
-                        LRESULT(0)
-                    }
-                    WM_TIMER => {
-                        handler.on_timer(hwnd);
-                        LRESULT(0)
-                    }
-                    WM_SIZE => {
-                        let width = (lparam.0 & 0xFFFF) as u32;
-                        let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
-                        handler.on_resize(hwnd, width, height);
-                        LRESULT(0)
-                    }
-                    WM_DESTROY => {
-                        handler.on_destroy();
-                        PostQuitMessage(0);
+        let handler = unsafe { &mut *handler_ptr };
 
-                        // Clean up handler
-                        let _ = Box::from_raw(handler_ptr);
-
-                        LRESULT(0)
-                    }
-                    WM_CLOSE => LRESULT(0), // Let host handle lifecycle
-                    _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-                }
-            } else {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
+        match msg {
+            WM_PAINT => handle_paint(handler, hwnd),
+            WM_TIMER => handle_timer(handler, hwnd),
+            WM_SIZE => handle_size(handler, hwnd, lparam),
+            WM_DESTROY => handle_destroy(handler, handler_ptr),
+            WM_CLOSE => LRESULT(0), // Let host handle lifecycle
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
 }

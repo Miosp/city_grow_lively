@@ -737,13 +737,10 @@ impl Renderer {
         let mut geometries = Vec::new();
 
         for op in operations {
-            match op {
-                DrawOperation::FilledRect { rect, .. } => {
-                    let geometry: ID2D1RectangleGeometry =
-                        unsafe { self.d2d_factory.CreateRectangleGeometry(rect)? };
-                    geometries.push(geometry.cast::<ID2D1Geometry>()?);
-                }
-                _ => {} // Skip non-fill operations
+            if let DrawOperation::FilledRect { rect, .. } = op {
+                let geometry: ID2D1RectangleGeometry =
+                    unsafe { self.d2d_factory.CreateRectangleGeometry(rect)? };
+                geometries.push(geometry.cast::<ID2D1Geometry>()?);
             }
         }
 

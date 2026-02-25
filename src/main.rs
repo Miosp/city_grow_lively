@@ -1,11 +1,14 @@
 #![windows_subsystem = "windows"]
 
+use std::{env::current_exe, path::PathBuf};
+
 use anyhow::{Context, Result};
 use app::App;
 use tracing::{debug, info};
-use window::Window;
+use tracing_appender::non_blocking::WorkerGuard;
+use window::{Window, WindowConfig};
 
-use crate::city_grow::CityGrowScene;
+use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
 mod app;
 mod city_grow;
@@ -13,15 +16,15 @@ mod renderer;
 mod scene;
 mod window;
 
-fn main() -> Result<()> {
+fn initialize_logging() -> WorkerGuard {
     // Get log path next to the executable
-    let log_dir = std::env::current_exe()
+    let log_dir = current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let file_appender = tracing_appender::rolling::never(&log_dir, "city_grow.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
         .with_ansi(false)
@@ -32,29 +35,33 @@ fn main() -> Result<()> {
         // .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    info!("Starting City Grow application");
     debug!(
         "Log file location: {}",
         log_dir.join("city_grow.log").display()
     );
-    // Create scene (frontend logic)
-    let scene = CityGrowScene::new(1920, 1080);
 
-    // Create app (ties everything together)
+    guard
+}
+
+fn main() -> Result<()> {
+    let _guard = initialize_logging();
+    info!("Starting City Grow animation");
+
+    let scene = CityGrowScene::new(1920, 1080); // Arbitrary size, the app will resize itself as needed
     let app = App::new(scene);
-
-    // Create window (backend)
-    let _window = Window::create("City Grow", app).context("Failed to create window")?;
+    let _window = Window::create(
+        WindowConfigBuilder::default()
+            .title("City Grow".to_string())
+            .build()?,
+        app,
+    )
+    .context("Failed to create window")?;
 
     debug!("Entering message loop");
-
-    // Run message loop
     let result = Window::run_message_loop().context("Message loop failed");
-
     info!("Exiting");
 
-    // Keep guard alive by explicitly dropping it at the end
-    drop(_guard);
+    drop(_guard); // Keep guard alive by explicitly dropping it at the end
 
     result
 }
