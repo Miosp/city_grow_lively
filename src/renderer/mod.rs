@@ -44,7 +44,6 @@ use windows::{
                 IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
             },
         },
-        UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
     },
     core::{Interface, w},
 };
@@ -89,12 +88,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Create a new renderer for the given window
-    pub fn new(hwnd: HWND) -> Result<Self> {
+    /// Create a new renderer for the given window with specific dimensions
+    pub fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
         unsafe {
-            let width = GetSystemMetrics(SM_CXSCREEN) as u32;
-            let height = GetSystemMetrics(SM_CYSCREEN) as u32;
-
             // Step 1: Create D3D11 device (Direct2D requires this)
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;

@@ -12,6 +12,7 @@ pub struct App<S: Scene> {
     last_frame_time: Instant,
     frame_count: u32,
     timer_active: bool,
+    window_shown: bool,
 }
 
 const TIMER_ID: usize = 1;
@@ -24,17 +25,21 @@ impl<S: Scene> App<S> {
             last_frame_time: Instant::now(),
             frame_count: 0,
             timer_active: true,
+            window_shown: false,
         }
     }
 
-    fn ensure_initialized(&mut self, hwnd: HWND) -> bool {
+    fn ensure_initialized(&mut self, hwnd: HWND, width: u32, height: u32) -> bool {
         if self.renderer.is_some() {
             return true;
         }
 
-        match Renderer::new(hwnd) {
+        match Renderer::new(hwnd, width, height) {
             Ok(renderer) => {
-                debug!("Renderer initialized successfully");
+                debug!(
+                    "Renderer initialized successfully with size {}x{}",
+                    width, height
+                );
                 self.renderer = Some(renderer);
                 true
             }
@@ -68,7 +73,7 @@ impl<S: Scene> App<S> {
         renderer.end_draw()?;
 
         self.frame_count += 1;
-        if self.frame_count % 60 == 0 {
+        if self.frame_count.is_multiple_of(60) {
             debug!("Rendered {} frames", self.frame_count);
         }
         Ok(())
@@ -83,8 +88,22 @@ impl<S: Scene> WindowHandler for App<S> {
             return;
         }
 
+        // Get current window size
+        let (width, height) = unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            if GetClientRect(hwnd, &mut rect).is_ok() {
+                (
+                    (rect.right - rect.left) as u32,
+                    (rect.bottom - rect.top) as u32,
+                )
+            } else {
+                (1280, 720) // fallback
+            }
+        };
+
         // Only handle paint when idle (timer stopped)
-        if !self.ensure_initialized(hwnd) {
+        if !self.ensure_initialized(hwnd, width, height) {
             return;
         }
 
@@ -95,7 +114,21 @@ impl<S: Scene> WindowHandler for App<S> {
     }
 
     fn on_timer(&mut self, hwnd: HWND) {
-        if !self.ensure_initialized(hwnd) {
+        // Get current window size
+        let (width, height) = unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            if GetClientRect(hwnd, &mut rect).is_ok() {
+                (
+                    (rect.right - rect.left) as u32,
+                    (rect.bottom - rect.top) as u32,
+                )
+            } else {
+                (1280, 720) // fallback
+            }
+        };
+
+        if !self.ensure_initialized(hwnd, width, height) {
             return;
         }
 
@@ -126,14 +159,24 @@ impl<S: Scene> WindowHandler for App<S> {
     fn on_resize(&mut self, hwnd: HWND, width: u32, height: u32) {
         debug!(width, height, "Window resized");
 
+        // Show window on first resize (after Lively has positioned it)
+        if !self.window_shown {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, ShowWindow};
+                ShowWindow(hwnd, SW_SHOW);
+            }
+            self.window_shown = true;
+            debug!("Window shown after initial resize");
+        }
+
         // Recreate renderer with new size
         self.renderer = None;
 
         // Notify scene
         self.scene.on_resize(width, height);
 
-        // Force re-initialization on next paint
-        self.ensure_initialized(hwnd);
+        // Force re-initialization with correct size
+        self.ensure_initialized(hwnd, width, height);
     }
 
     fn on_destroy(&mut self) {

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use app::App;
 use tracing::{debug, info};
 use tracing_appender::non_blocking::WorkerGuard;
-use window::{Window, WindowConfig};
+use window::Window;
 
 use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
@@ -47,11 +47,12 @@ fn main() -> Result<()> {
     let _guard = initialize_logging();
     info!("Starting City Grow animation");
 
-    let scene = CityGrowScene::new(1920, 1080); // Arbitrary size, the app will resize itself as needed
+    let scene = CityGrowScene::new(1920, 1080); // Initial size, will be updated on first resize
     let app = App::new(scene);
     let _window = Window::create(
         WindowConfigBuilder::default()
             .title("City Grow".to_string())
+            .fullscreen(true) // Borderless fullscreen for Lively wallpaper
             .build()?,
         app,
     )

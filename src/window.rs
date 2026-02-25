@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use derive_builder::Builder;
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -34,6 +35,10 @@ pub struct WindowConfig {
     pub title: String,
     #[builder(default = false)]
     pub fullscreen: bool,
+    #[builder(default = None)]
+    pub width: Option<u32>,
+    #[builder(default = None)]
+    pub height: Option<u32>,
 }
 
 /// Trait for handling window events
@@ -108,13 +113,15 @@ impl Window {
 
             // Determine window style and dimensions based on config
             let (style, ex_style, width, height, x, y) = if config.fullscreen {
-                let screen_width = GetSystemMetrics(SM_CXSCREEN);
-                let screen_height = GetSystemMetrics(SM_CYSCREEN);
+                // For fullscreen/Lively mode, let Lively resize the window
+                // Initially hidden to avoid white flash, shown after first resize
+                let w = config.width.unwrap_or(DEFAULT_WINDOW_WIDTH) as i32;
+                let h = config.height.unwrap_or(DEFAULT_WINDOW_HEIGHT) as i32;
                 (
-                    WS_POPUP | WS_VISIBLE,
-                    WINDOW_EX_STYLE::default(),
-                    screen_width,
-                    screen_height,
+                    WS_POPUP,         // No WS_VISIBLE - initially hidden
+                    WS_EX_TOOLWINDOW, // Don't show in taskbar
+                    w,
+                    h,
                     0,
                     0,
                 )
@@ -122,8 +129,8 @@ impl Window {
                 (
                     WS_OVERLAPPEDWINDOW,
                     WINDOW_EX_STYLE::default(),
-                    DEFAULT_WINDOW_WIDTH as i32,
-                    DEFAULT_WINDOW_HEIGHT as i32,
+                    config.width.unwrap_or(DEFAULT_WINDOW_WIDTH) as i32,
+                    config.height.unwrap_or(DEFAULT_WINDOW_HEIGHT) as i32,
                     CW_USEDEFAULT,
                     CW_USEDEFAULT,
                 )
@@ -154,7 +161,10 @@ impl Window {
             )
             .context("Failed to create window")?;
 
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            // For non-fullscreen mode, show window immediately
+            if !config.fullscreen {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+            }
 
             // Start frame timer
             SetTimer(
@@ -163,6 +173,23 @@ impl Window {
                 DEFAULT_FRAME_INTERVAL_MS,
                 None,
             );
+
+            // Trigger initial resize for non-fullscreen mode
+            // For fullscreen/Lively mode, wait for Lively to resize the window
+            if !config.fullscreen {
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                if GetClientRect(hwnd, &mut rect).is_ok() {
+                    let actual_width = (rect.right - rect.left) as u32;
+                    let actual_height = (rect.bottom - rect.top) as u32;
+
+                    // Get handler and trigger resize
+                    let handler_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut H;
+                    if !handler_ptr.is_null() {
+                        let handler = &mut *handler_ptr;
+                        handler.on_resize(hwnd, actual_width, actual_height);
+                    }
+                }
+            }
 
             Ok(Self { hwnd })
         }
