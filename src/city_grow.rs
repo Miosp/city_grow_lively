@@ -889,9 +889,6 @@ impl CityGrowScene {
         // Use batch drawing for efficiency
         renderer.draw_batch(&optimized_ops)?;
 
-        // Restore normal blend mode
-        renderer.set_normal_blend();
-
         Ok(())
     }
 

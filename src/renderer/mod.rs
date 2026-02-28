@@ -16,7 +16,7 @@ use windows::{
                 D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                 D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_FLAT,
                 D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PRIMITIVE_BLEND_MIN,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_PRIMITIVE_BLEND_MIN,
                 D2D1_PRIMITIVE_BLEND_SOURCE_OVER, D2D1_STROKE_STYLE_PROPERTIES1, D2D1CreateFactory,
                 ID2D1Bitmap1, ID2D1CommandList, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
                 ID2D1Geometry, ID2D1RectangleGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
@@ -68,9 +68,9 @@ pub struct Renderer {
     d2d_factory: ID2D1Factory1,
     d2d_device: ID2D1Device,
     d2d_context: ID2D1DeviceContext,
-    d2d_bitmap: ID2D1Bitmap1,                  // Swap chain's back buffer
-    intermediate_bitmap: Option<ID2D1Bitmap1>, // Intermediate render target for incremental rendering
-    cached_scene_bitmap: Option<ID2D1Bitmap1>, // Cached full scene for efficient reverse animation
+    d2d_bitmap: ID2D1Bitmap1, // Swap chain's back buffer
+    // Intermediate render target for incremental rendering (avoids full scene redraws: 20% GPU → 1% GPU)
+    intermediate_bitmap: Option<ID2D1Bitmap1>,
 
     // DirectWrite
     dwrite_factory: IDWriteFactory,
@@ -338,7 +338,6 @@ impl Renderer {
                 d2d_context,
                 d2d_bitmap,
                 intermediate_bitmap: None,
-                cached_scene_bitmap: None,
                 dwrite_factory,
                 swap_chain,
                 composition_device,
@@ -396,6 +395,15 @@ impl Renderer {
         self.incremental_with_copy(true)
     }
 
+    /// Enable incremental rendering mode without copying existing content
+    ///
+    /// Incremental rendering uses an intermediate bitmap as the render target,
+    /// which accumulates drawing operations across frames. This is CRITICAL for performance:
+    /// - Without incremental: Full scene redraw every frame (~20% GPU usage)
+    /// - With incremental: Only draw new content each frame (~1% GPU usage)
+    ///
+    /// The intermediate bitmap is copied to the swap chain during end_draw() for presentation.
+    /// Uses NEAREST_NEIGHBOR interpolation for efficient 1:1 pixel-aligned copy.
     pub fn incremental_no_copy(&mut self) -> Result<()> {
         self.incremental_with_copy(false)
     }
@@ -471,95 +479,6 @@ impl Renderer {
         self.intermediate_bitmap = None;
     }
 
-    /// Create cached scene bitmap for efficient reverse animation
-    /// This bitmap stores the fully rendered scene, avoiding redraw every frame
-    pub fn ensure_cached_scene_bitmap(&mut self) -> Result<()> {
-        if self.cached_scene_bitmap.is_some() {
-            return Ok(());
-        }
-
-        let bitmap_properties = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-            colorContext: ManuallyDrop::new(None),
-        };
-
-        let cached_bitmap: ID2D1Bitmap1 = unsafe {
-            self.d2d_context
-                .CreateBitmap(
-                    D2D_SIZE_U {
-                        width: self.width,
-                        height: self.height,
-                    },
-                    None,
-                    0,
-                    &bitmap_properties,
-                )
-                .context("Failed to create cached scene bitmap")?
-        };
-
-        self.cached_scene_bitmap = Some(cached_bitmap);
-        Ok(())
-    }
-
-    /// Begin drawing to the cached scene bitmap (for regenerating the scene)
-    pub fn begin_draw_to_cached_scene(&mut self) -> Result<()> {
-        self.ensure_cached_scene_bitmap()?;
-
-        unsafe {
-            self.d2d_context
-                .SetTarget(self.cached_scene_bitmap.as_ref().unwrap());
-        }
-
-        Ok(())
-    }
-
-    /// Finish drawing to cached scene and restore normal render target
-    pub fn end_draw_to_cached_scene(&mut self) {
-        // Restore the appropriate render target
-        unsafe {
-            if let Some(intermediate) = &self.intermediate_bitmap {
-                self.d2d_context.SetTarget(intermediate);
-            } else {
-                self.d2d_context.SetTarget(&self.d2d_bitmap);
-            }
-        }
-    }
-
-    /// Draw the cached scene bitmap to the current render target (fast blit)
-    pub fn draw_cached_scene(&self) -> Result<()> {
-        if let Some(cached_bitmap) = &self.cached_scene_bitmap {
-            let dest_rect = D2D_RECT_F {
-                left: 0.0,
-                top: 0.0,
-                right: self.width as f32,
-                bottom: self.height as f32,
-            };
-
-            unsafe {
-                self.d2d_context.DrawBitmap(
-                    cached_bitmap,
-                    Some(&dest_rect),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    None,
-                    None,
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Clear the cached scene bitmap
-    pub fn clear_cached_scene(&mut self) {
-        self.cached_scene_bitmap = None;
-    }
-
     /// End a rendering frame and present to screen
     pub fn end_draw(&self) -> Result<()> {
         // Finish drawing to intermediate bitmap
@@ -584,11 +503,12 @@ impl Renderer {
             };
 
             unsafe {
+                // Use NEAREST_NEIGHBOR for 1:1 pixel-aligned copy (no bilinear filtering overhead)
                 self.d2d_context.DrawBitmap(
                     self.intermediate_bitmap.as_ref().unwrap(),
                     Some(&dest_rect),
                     1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                     None,
                     None,
                 );
@@ -694,6 +614,7 @@ impl Renderer {
         }
     }
 
+    /// Draw a line between two points
     pub fn draw_line(
         &self,
         start: Vector2,
@@ -774,7 +695,92 @@ impl Renderer {
             return Ok(());
         }
 
-        // Group operations by color and type (stroke vs fill) to minimize state changes
+        // Fast path: check if all operations share the same color (common during reverse animation)
+        // This avoids HashMap allocation and grouping overhead
+        let first_color = match &operations[0] {
+            DrawOperation::Line { color, .. } => color,
+            DrawOperation::Rect { color, .. } => color,
+            DrawOperation::FilledRect { color, .. } => color,
+            DrawOperation::Polyline { color, .. } => color,
+        };
+        let first_color_key = Self::color_to_key(first_color);
+
+        let all_same_color = operations.iter().all(|op| {
+            let color_key = match op {
+                DrawOperation::Line { color, .. } => Self::color_to_key(color),
+                DrawOperation::Rect { color, .. } => Self::color_to_key(color),
+                DrawOperation::FilledRect { color, .. } => Self::color_to_key(color),
+                DrawOperation::Polyline { color, .. } => Self::color_to_key(color),
+            };
+            color_key == first_color_key
+        });
+
+        if all_same_color {
+            // Fast path: single color - process all operations together by type
+            let brush = self.get_solid_brush(first_color)?;
+
+            // Separate by fill vs stroke
+            let (fill_ops, stroke_ops): (Vec<_>, Vec<_>) = operations
+                .iter()
+                .partition(|op| matches!(op, DrawOperation::FilledRect { .. }));
+
+            // Draw filled shapes
+            if !fill_ops.is_empty() {
+                let geometries = self.create_fill_geometries(fill_ops)?;
+                if !geometries.is_empty() {
+                    let geometry_refs: Vec<Option<ID2D1Geometry>> =
+                        geometries.iter().map(|g| Some(g.clone())).collect();
+                    let geometry_group = unsafe {
+                        self.d2d_factory
+                            .CreateGeometryGroup(D2D1_FILL_MODE_WINDING, &geometry_refs)?
+                    };
+                    unsafe {
+                        self.d2d_context.FillGeometry(&geometry_group, &brush, None);
+                    }
+                }
+            }
+
+            // Draw stroked shapes (group by thickness)
+            let mut stroke_by_thickness: std::collections::HashMap<u32, Vec<&DrawOperation>> =
+                std::collections::HashMap::new();
+            for op in stroke_ops {
+                let thickness = match op {
+                    DrawOperation::Line { thickness, .. } => *thickness,
+                    DrawOperation::Rect { thickness, .. } => *thickness,
+                    DrawOperation::Polyline { thickness, .. } => *thickness,
+                    _ => continue,
+                };
+                stroke_by_thickness
+                    .entry(thickness.to_bits())
+                    .or_default()
+                    .push(op);
+            }
+
+            for (thickness_bits, ops) in stroke_by_thickness {
+                let thickness = f32::from_bits(thickness_bits);
+                let geometries = self.create_stroke_geometries(ops)?;
+                if !geometries.is_empty() {
+                    let geometry_refs: Vec<Option<ID2D1Geometry>> =
+                        geometries.iter().map(|g| Some(g.clone())).collect();
+                    let geometry_group = unsafe {
+                        self.d2d_factory
+                            .CreateGeometryGroup(D2D1_FILL_MODE_WINDING, &geometry_refs)?
+                    };
+                    unsafe {
+                        self.d2d_context.DrawGeometry(
+                            &geometry_group,
+                            &brush,
+                            thickness,
+                            &self.flat_cap_stroke_style,
+                        );
+                    }
+                }
+            }
+
+            return Ok(());
+        }
+
+        // General path: multiple colors - group by color, type, and thickness
         use std::collections::HashMap;
         #[derive(Hash, Eq, PartialEq)]
         struct DrawKey {
