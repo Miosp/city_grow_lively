@@ -3,6 +3,7 @@ use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 pub trait D2DColorExt {
     fn with_alpha(&self, alpha: f32) -> Self;
 
+    #[inline]
     fn black() -> D2D1_COLOR_F {
         D2D1_COLOR_F {
             r: 0.0,
@@ -14,6 +15,7 @@ pub trait D2DColorExt {
 }
 
 impl D2DColorExt for D2D1_COLOR_F {
+    #[inline]
     fn with_alpha(&self, alpha: f32) -> Self {
         Self {
             r: self.r,

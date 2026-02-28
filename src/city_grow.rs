@@ -12,11 +12,6 @@ use tracing::debug;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows_numerics::Vector2;
 
-// Rendering constants
-const LINE_WIDTH: f32 = 2.0;
-const LINE_OFFSET: f32 = LINE_WIDTH / 2.0;
-const MARGIN: f32 = LINE_WIDTH / 2.0;
-
 const POSITIONS: [Pos; 4] = [
     Pos { x: 1, y: 0 },  // East
     Pos { x: -1, y: 0 }, // West
@@ -205,6 +200,9 @@ pub struct CityGrowConfig {
     pub max_steps_back: u16,
     pub lightness_default: u8,
     pub lightness_branch: u8,
+    pub saturation_main: u8,
+    pub saturation_branch: u8,
+    pub city_rect_alpha: f32,
     pub scale: f32,
     pub reverse_actions_per_frame: usize,
     pub land_directional_bias: f32,
@@ -217,18 +215,21 @@ impl Default for CityGrowConfig {
             life_time_branch: 15,
             prop_city_to_land: 0.12,
             prop_land_to_city: 0.03,
-            prop_branch_off_city: 15.0,
-            prop_branch_off_land: 6.0,
-            prop_branch_off_to_main: 1.0,
+            prop_branch_off_city: 0.15,
+            prop_branch_off_land: 0.06,
+            prop_branch_off_to_main: 0.02,
             branch_fall_off: 50.0,
-            change_hue_new_main: 9,
+            change_hue_new_main: 11,
             start_branches: 3,
             max_steps_back: 50,
             lightness_default: 140,
             lightness_branch: 60,
+            saturation_main: 255,
+            saturation_branch: 255,
+            city_rect_alpha: 0.35,
             scale: 2.0,
             reverse_actions_per_frame: 50,
-            land_directional_bias: 2.5,
+            land_directional_bias: 3.0,
         }
     }
 }
@@ -267,7 +268,7 @@ impl Branch {
         let hue: u8 = rng.random_range(0..=255);
 
         // Pre-calculate colors
-        let color = Hsla::new(hue, 255, config.lightness_default, 255);
+        let color = Hsla::new(hue, config.saturation_main, config.lightness_default, 255);
 
         Self {
             id: rng.random(),
@@ -393,9 +394,9 @@ impl Branch {
                     neighbors.len() as u32,
                     (neighbors.len() as f32 * config.land_directional_bias).round() as u32,
                 ) {
-                    return (self, preferred);
+                    return (self, *neighbors.choose(rng).unwrap());
                 }
-                return (self, *neighbors.choose(rng).unwrap());
+                return (self, preferred);
             }
             let new_target = *neighbors.choose(rng).unwrap();
             let new_direction = new_target
@@ -438,7 +439,12 @@ impl Branch {
             own_fields: vec![selected_neighbor],
             age: 0,
             life_time: config.life_time_branch,
-            color: Hsla::new(self.color.h, 255, config.lightness_branch, 255),
+            color: Hsla::new(
+                self.color.h,
+                config.saturation_branch,
+                config.lightness_branch,
+                255,
+            ),
         };
 
         let branch_event = Event::BranchOff {
@@ -533,10 +539,9 @@ impl CityGrowScene {
 
         while i < self.branch_list.len() {
             let branch = self.branch_list.swap_remove(i);
-            let scaled_chance = (self.config.branch_chance(branch.mode)
+            let scaled_chance = self.config.branch_chance(branch.mode)
                 * (1.0 + self.config.branch_fall_off)
-                / (self.config.branch_fall_off + branch_count as f32))
-                / 100.0;
+                / (self.config.branch_fall_off + branch_count as f32);
 
             if self.rng.random::<f32>() < scaled_chance {
                 match branch.try_branch_off(&self.grid, &self.config, &mut self.rng) {
@@ -549,25 +554,24 @@ impl CityGrowScene {
                         self.grid.set(pos.x as u32, pos.y as u32, true);
                         events.push(event);
 
-                        let child = if self.rng.random::<f32>()
-                            < self.config.prop_branch_off_to_main / 100.0
-                        {
-                            let promoted_child = Branch {
-                                color: Hsla::new(
-                                    ((child.color.h + self.config.change_hue_new_main) as u16 % 256)
-                                        as u8,
-                                    255,
-                                    self.config.lightness_default,
-                                    255,
-                                ),
-                                life_time: self.config.life_time,
-                                ..child
+                        let child =
+                            if self.rng.random::<f32>() < self.config.prop_branch_off_to_main {
+                                let promoted_child = Branch {
+                                    color: Hsla::new(
+                                        ((child.color.h + self.config.change_hue_new_main) as u16
+                                            % 256) as u8,
+                                        self.config.saturation_main,
+                                        self.config.lightness_default,
+                                        255,
+                                    ),
+                                    life_time: self.config.life_time,
+                                    ..child
+                                };
+                                self.painter_state.main_branches.insert(promoted_child.id);
+                                promoted_child
+                            } else {
+                                child
                             };
-                            self.painter_state.main_branches.insert(promoted_child.id);
-                            promoted_child
-                        } else {
-                            child
-                        };
 
                         self.branch_list.push(child);
                         self.branch_list.push(new_parent);
@@ -624,8 +628,8 @@ impl CityGrowScene {
     /// Helper: Convert grid position to screen coordinates
     fn grid_to_screen(&self, pos: Pos) -> Vector2 {
         Vector2 {
-            X: pos.x as f32 * 2.0 * self.config.scale + LINE_OFFSET,
-            Y: pos.y as f32 * 2.0 * self.config.scale + LINE_OFFSET,
+            X: pos.x as f32 * 2.0 * self.config.scale + self.config.scale / 2.0,
+            Y: pos.y as f32 * 2.0 * self.config.scale + self.config.scale / 2.0,
         }
     }
 
@@ -645,16 +649,14 @@ impl CityGrowScene {
             to_pos.y.min(imaginary_point.y),
         );
         D2D_RECT_F {
-            left: corner.x as f32 * 2.0 * self.config.scale + MARGIN + LINE_OFFSET,
-            top: corner.y as f32 * 2.0 * self.config.scale + MARGIN + LINE_OFFSET,
+            left: corner.x as f32 * 2.0 * self.config.scale + self.config.scale,
+            top: corner.y as f32 * 2.0 * self.config.scale + self.config.scale,
             right: corner.x as f32 * 2.0 * self.config.scale
-                + MARGIN
-                + LINE_OFFSET
-                + (2.0 * self.config.scale - 2.0 * MARGIN),
+                + self.config.scale
+                + (2.0 * self.config.scale - self.config.scale),
             bottom: corner.y as f32 * 2.0 * self.config.scale
-                + MARGIN
-                + LINE_OFFSET
-                + (2.0 * self.config.scale - 2.0 * MARGIN),
+                + self.config.scale
+                + (2.0 * self.config.scale - self.config.scale),
         }
     }
 
@@ -719,13 +721,13 @@ impl CityGrowScene {
         }
 
         // Draw fill rectangles
-        let fade_color = d2d_color.with_alpha(0.25);
+        let fade_color = d2d_color.with_alpha(self.config.city_rect_alpha);
         for rect in &rects_to_draw {
             renderer.draw_filled_rect(rect, &fade_color)?;
         }
 
         // Draw the line
-        renderer.draw_line(screen_from, screen_to, &d2d_color, LINE_WIDTH)?;
+        renderer.draw_line(screen_from, screen_to, &d2d_color, self.config.scale)?;
 
         // Store in history for reverse animation
         let branch_history = self
@@ -741,7 +743,7 @@ impl CityGrowScene {
             screen_from,
             screen_to,
             d2d_color,
-            LINE_WIDTH,
+            self.config.scale,
         ));
 
         Ok(())
@@ -896,22 +898,16 @@ impl CityGrowScene {
     /// Process reverse animation step
     /// Non-main branches erase first, then main branches
     fn reverse_step(&mut self, renderer: &Renderer) -> Result<bool> {
-        let history_size = self.painter_state.draw_history.len();
-        if history_size == 0 {
+        if self.painter_state.draw_history.is_empty() {
             return Ok(true); // Done reversing
         }
 
-        // Separate branches into main and non-main
-        let mut main_branch_ids: Vec<u32> = Vec::new();
-        let mut non_main_branch_ids: Vec<u32> = Vec::new();
-
-        for branch_id in self.painter_state.draw_history.keys() {
-            if self.painter_state.main_branches.contains(branch_id) {
-                main_branch_ids.push(*branch_id);
-            } else {
-                non_main_branch_ids.push(*branch_id);
-            }
-        }
+        let (main_branch_ids, non_main_branch_ids): (Vec<u32>, Vec<u32>) = self
+            .painter_state
+            .draw_history
+            .keys()
+            .copied()
+            .partition(|branch_id| self.painter_state.main_branches.contains(branch_id));
 
         // Decide which branches to process (non-main first, then main)
         let branches_to_process = if !non_main_branch_ids.is_empty() {
