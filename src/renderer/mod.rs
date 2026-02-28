@@ -21,7 +21,10 @@ use windows::{
                 ID2D1Bitmap1, ID2D1CommandList, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
                 ID2D1Geometry, ID2D1RectangleGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
             },
-            Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
+            Direct3D::{
+                D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
+                D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+            },
             Direct3D11::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
                 ID3D11Device, ID3D11DeviceContext,
@@ -155,22 +158,40 @@ impl Renderer {
             // Step 2: Create D3D11 device (Direct2D requires this)
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
+            let mut feature_level: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL_11_0;
 
+            // Try feature levels in descending order: 11.1, 11.0, 10.1, 10.0
+            // This provides broader hardware compatibility
             D3D11CreateDevice(
                 &adapter,
                 D3D_DRIVER_TYPE_UNKNOWN, // Must use UNKNOWN when providing an adapter
                 Default::default(),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
+                Some(&[
+                    D3D_FEATURE_LEVEL_11_1,
+                    D3D_FEATURE_LEVEL_11_0,
+                    D3D_FEATURE_LEVEL_10_1,
+                    D3D_FEATURE_LEVEL_10_0,
+                ]),
                 D3D11_SDK_VERSION,
                 Some(&mut device as *mut _),
-                None,
+                Some(&mut feature_level),
                 Some(&mut context as *mut _),
             )
             .context("Failed to create D3D11 device")?;
 
             let d3d_device = device.context("D3D11 device is None")?;
             let d3d_context = context.context("D3D11 context is None")?;
+
+            // Log the selected feature level
+            let feature_level_str = match feature_level {
+                D3D_FEATURE_LEVEL_11_1 => "11.1",
+                D3D_FEATURE_LEVEL_11_0 => "11.0",
+                D3D_FEATURE_LEVEL_10_1 => "10.1",
+                D3D_FEATURE_LEVEL_10_0 => "10.0",
+                _ => "Unknown",
+            };
+            info!("Direct3D Feature Level: {}", feature_level_str);
 
             // Step 3: Get DXGI device
             let dxgi_device: IDXGIDevice = d3d_device
