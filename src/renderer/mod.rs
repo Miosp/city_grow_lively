@@ -39,9 +39,10 @@ use windows::{
                 Common::{
                     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
                 },
-                DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
-                IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
+                DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT,
+                DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISurface,
+                IDXGISwapChain1,
             },
         },
     },
@@ -498,7 +499,27 @@ impl Renderer {
 
         unsafe {
             // Present to screen
-            let _ = self.swap_chain.Present(1, DXGI_PRESENT(0));
+            let present_hr = self.swap_chain.Present(1, DXGI_PRESENT(0));
+
+            // Check for device loss errors
+            if present_hr.is_err() {
+                if present_hr == DXGI_ERROR_DEVICE_REMOVED {
+                    // Get the reason for device removal
+                    let device_removed_reason = self.d3d_device.GetDeviceRemovedReason();
+                    anyhow::bail!(
+                        "GPU device removed during Present (DXGI_ERROR_DEVICE_REMOVED). \
+                         Reason: {:?}. This typically indicates a GPU driver crash or hardware issue.",
+                        device_removed_reason
+                    );
+                } else if present_hr == DXGI_ERROR_DEVICE_RESET {
+                    anyhow::bail!(
+                        "GPU device reset during Present (DXGI_ERROR_DEVICE_RESET). \
+                         Device needs to be recreated."
+                    );
+                } else {
+                    present_hr.ok().context("Present failed")?;
+                }
+            }
 
             self.composition_device
                 .Commit()
