@@ -107,7 +107,7 @@ impl Window {
                 hInstance: instance.into(),
                 lpszClassName: WINDOW_CLASS_NAME,
                 lpfnWndProc: Some(Self::wndproc::<H>),
-                style: CS_HREDRAW | CS_VREDRAW,
+                style: Default::default(),
                 hCursor: LoadCursorW(None, IDC_ARROW).context("Failed to load cursor")?,
                 ..Default::default()
             };
