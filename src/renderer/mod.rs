@@ -693,104 +693,22 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draw multiple operations in a batch, optimized by grouping by color and using geometry groups
+    /// Draw multiple operations in a batch using immediate-mode drawing (no geometry groups)
+    ///
+    /// Geometry groups add massive overhead from CreatePathGeometry/CreateRectangleGeometry
+    /// COM object creation every frame. For immediate-mode rendering, direct drawing is 10x faster.
     pub fn draw_batch(&self, operations: &[DrawOperation]) -> Result<()> {
         if operations.is_empty() {
             return Ok(());
         }
 
-        // Fast path: check if all operations share the same color (common during reverse animation)
-        // This avoids HashMap allocation and grouping overhead
-        let first_color = match &operations[0] {
-            DrawOperation::Line { color, .. } => color,
-            DrawOperation::Rect { color, .. } => color,
-            DrawOperation::FilledRect { color, .. } => color,
-            DrawOperation::Polyline { color, .. } => color,
-        };
-        let first_color_key = Self::color_to_key(first_color);
-
-        let all_same_color = operations.iter().all(|op| {
-            let color_key = match op {
-                DrawOperation::Line { color, .. } => Self::color_to_key(color),
-                DrawOperation::Rect { color, .. } => Self::color_to_key(color),
-                DrawOperation::FilledRect { color, .. } => Self::color_to_key(color),
-                DrawOperation::Polyline { color, .. } => Self::color_to_key(color),
-            };
-            color_key == first_color_key
-        });
-
-        if all_same_color {
-            // Fast path: single color - process all operations together by type
-            let brush = self.get_solid_brush(first_color)?;
-
-            // Separate by fill vs stroke
-            let (fill_ops, stroke_ops): (Vec<_>, Vec<_>) = operations
-                .iter()
-                .partition(|op| matches!(op, DrawOperation::FilledRect { .. }));
-
-            // Draw filled shapes
-            if !fill_ops.is_empty() {
-                let geometries = self.create_fill_geometries(fill_ops)?;
-                if !geometries.is_empty() {
-                    let geometry_refs: Vec<Option<ID2D1Geometry>> =
-                        geometries.iter().map(|g| Some(g.clone())).collect();
-                    let geometry_group = unsafe {
-                        self.d2d_factory
-                            .CreateGeometryGroup(D2D1_FILL_MODE_WINDING, &geometry_refs)?
-                    };
-                    unsafe {
-                        self.d2d_context.FillGeometry(&geometry_group, &brush, None);
-                    }
-                }
-            }
-
-            // Draw stroked shapes (group by thickness)
-            let mut stroke_by_thickness: std::collections::HashMap<u32, Vec<&DrawOperation>> =
-                std::collections::HashMap::new();
-            for op in stroke_ops {
-                let thickness = match op {
-                    DrawOperation::Line { thickness, .. } => *thickness,
-                    DrawOperation::Rect { thickness, .. } => *thickness,
-                    DrawOperation::Polyline { thickness, .. } => *thickness,
-                    _ => continue,
-                };
-                stroke_by_thickness
-                    .entry(thickness.to_bits())
-                    .or_default()
-                    .push(op);
-            }
-
-            for (thickness_bits, ops) in stroke_by_thickness {
-                let thickness = f32::from_bits(thickness_bits);
-                let geometries = self.create_stroke_geometries(ops)?;
-                if !geometries.is_empty() {
-                    let geometry_refs: Vec<Option<ID2D1Geometry>> =
-                        geometries.iter().map(|g| Some(g.clone())).collect();
-                    let geometry_group = unsafe {
-                        self.d2d_factory
-                            .CreateGeometryGroup(D2D1_FILL_MODE_WINDING, &geometry_refs)?
-                    };
-                    unsafe {
-                        self.d2d_context.DrawGeometry(
-                            &geometry_group,
-                            &brush,
-                            thickness,
-                            &self.flat_cap_stroke_style,
-                        );
-                    }
-                }
-            }
-
-            return Ok(());
-        }
-
-        // General path: multiple colors - group by color, type, and thickness
+        // Group operations by color and type to minimize brush switches
         use std::collections::HashMap;
         #[derive(Hash, Eq, PartialEq)]
         struct DrawKey {
             color_key: u32,
             is_fill: bool,
-            thickness_bits: u32, // Store thickness as bits for hashing
+            thickness_bits: u32,
         }
 
         let mut grouped: HashMap<DrawKey, Vec<&DrawOperation>> = HashMap::new();
@@ -817,112 +735,67 @@ impl Renderer {
             grouped.entry(key).or_default().push(op);
         }
 
-        // Process each color/type group
+        // Process each color/type group - use direct drawing (no geometry creation overhead)
         for (key, ops) in grouped {
             let color = Self::key_to_color(key.color_key);
             let brush = self.get_solid_brush(&color)?;
 
-            if key.is_fill {
-                // Create geometry group for filled shapes
-                let geometries = self.create_fill_geometries(ops)?;
-                if !geometries.is_empty() {
-                    let geometry_refs: Vec<Option<ID2D1Geometry>> =
-                        geometries.iter().map(|g| Some(g.clone())).collect();
-                    let geometry_group = unsafe {
-                        self.d2d_factory
-                            .CreateGeometryGroup(D2D1_FILL_MODE_WINDING, &geometry_refs)?
-                    };
-                    unsafe {
-                        self.d2d_context.FillGeometry(&geometry_group, &brush, None);
+            unsafe {
+                if key.is_fill {
+                    // Draw filled rectangles directly
+                    for op in ops {
+                        if let DrawOperation::FilledRect { rect, .. } = op {
+                            self.d2d_context.FillRectangle(rect, &brush);
+                        }
                     }
-                }
-            } else {
-                // Create geometry group for stroked shapes
-                let thickness = f32::from_bits(key.thickness_bits);
-                let geometries = self.create_stroke_geometries(ops)?;
-                if !geometries.is_empty() {
-                    let geometry_refs: Vec<Option<ID2D1Geometry>> =
-                        geometries.iter().map(|g| Some(g.clone())).collect();
-                    let geometry_group = unsafe {
-                        self.d2d_factory
-                            .CreateGeometryGroup(D2D1_FILL_MODE_WINDING, &geometry_refs)?
-                    };
-                    unsafe {
-                        self.d2d_context.DrawGeometry(
-                            &geometry_group,
-                            &brush,
-                            thickness,
-                            &self.flat_cap_stroke_style,
-                        );
+                } else {
+                    // Draw stroked shapes directly
+                    let thickness = f32::from_bits(key.thickness_bits);
+                    for op in ops {
+                        match op {
+                            DrawOperation::Line { start, end, .. } => {
+                                self.d2d_context.DrawLine(
+                                    *start,
+                                    *end,
+                                    &brush,
+                                    thickness,
+                                    &self.flat_cap_stroke_style,
+                                );
+                            }
+                            DrawOperation::Rect { rect, .. } => {
+                                self.d2d_context.DrawRectangle(
+                                    rect,
+                                    &brush,
+                                    thickness,
+                                    &self.flat_cap_stroke_style,
+                                );
+                            }
+                            DrawOperation::Polyline { points, .. } => {
+                                // For polylines, we need a geometry (but don't group it)
+                                if points.len() >= 2 {
+                                    let path = self.d2d_factory.CreatePathGeometry()?;
+                                    let sink = path.Open()?;
+                                    sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_HOLLOW);
+                                    sink.AddLines(&points[1..]);
+                                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                    sink.Close()?;
+
+                                    self.d2d_context.DrawGeometry(
+                                        &path,
+                                        &brush,
+                                        thickness,
+                                        &self.flat_cap_stroke_style,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
         }
 
         Ok(())
-    }
-
-    /// Create geometries for filled shapes (rectangles)
-    fn create_fill_geometries(
-        &self,
-        operations: Vec<&DrawOperation>,
-    ) -> Result<Vec<ID2D1Geometry>> {
-        let mut geometries = Vec::new();
-
-        for op in operations {
-            if let DrawOperation::FilledRect { rect, .. } = op {
-                let geometry: ID2D1RectangleGeometry =
-                    unsafe { self.d2d_factory.CreateRectangleGeometry(rect)? };
-                geometries.push(geometry.cast::<ID2D1Geometry>()?);
-            }
-        }
-
-        Ok(geometries)
-    }
-
-    /// Create geometries for stroked shapes (lines, rects, polylines)
-    fn create_stroke_geometries(
-        &self,
-        operations: Vec<&DrawOperation>,
-    ) -> Result<Vec<ID2D1Geometry>> {
-        let mut geometries = Vec::new();
-
-        for op in operations {
-            match op {
-                DrawOperation::Line { start, end, .. } => {
-                    let path = unsafe { self.d2d_factory.CreatePathGeometry()? };
-                    let sink = unsafe { path.Open()? };
-                    unsafe {
-                        sink.BeginFigure(*start, D2D1_FIGURE_BEGIN_HOLLOW);
-                        sink.AddLine(*end);
-                        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                        sink.Close()?;
-                    }
-                    geometries.push(path.cast::<ID2D1Geometry>()?);
-                }
-                DrawOperation::Rect { rect, .. } => {
-                    let geometry: ID2D1RectangleGeometry =
-                        unsafe { self.d2d_factory.CreateRectangleGeometry(rect)? };
-                    geometries.push(geometry.cast::<ID2D1Geometry>()?);
-                }
-                DrawOperation::Polyline { points, .. } => {
-                    if points.len() >= 2 {
-                        let path = unsafe { self.d2d_factory.CreatePathGeometry()? };
-                        let sink = unsafe { path.Open()? };
-                        unsafe {
-                            sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_HOLLOW);
-                            sink.AddLines(&points[1..]);
-                            sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                            sink.Close()?;
-                        }
-                        geometries.push(path.cast::<ID2D1Geometry>()?);
-                    }
-                }
-                _ => {} // Skip fill operations
-            }
-        }
-
-        Ok(geometries)
     }
 
     /// Convert a cache key back to a color
