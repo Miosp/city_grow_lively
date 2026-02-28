@@ -660,8 +660,9 @@ impl CityGrowScene {
         }
     }
 
-    /// Draw a move event (line + optional fill rectangles for city mode)
-    fn draw_move(&mut self, renderer: &Renderer, event: &Event) -> Result<()> {
+    /// Convert a move event into draw operations (line + optional fill rectangles for city mode)
+    /// Returns operations to draw and store in history
+    fn event_to_draw_operations(&mut self, event: &Event) -> (u32, Vec<DrawOperation>) {
         let (branch_id, from_pos, to_pos, mode, color, own_fields_tip) = match event {
             Event::Move {
                 branch_id,
@@ -698,8 +699,9 @@ impl CityGrowScene {
         let screen_to = self.grid_to_screen(to_pos);
         let d2d_color = color.to_d2d_color();
 
-        // Compute rectangles before borrowing history
-        let mut rects_to_draw = Vec::new();
+        let mut operations = Vec::new();
+
+        // Add fill rectangles for city mode
         if mode == BranchMode::City {
             // Calculate direction of the line being drawn
             let direction = Pos::new(to_pos.x - from_pos.x, to_pos.y - from_pos.y);
@@ -715,38 +717,22 @@ impl CityGrowScene {
                     to_pos,
                     Pos::new(-perpendicular.x, -perpendicular.y),
                 );
-                rects_to_draw.push(rect1);
-                rects_to_draw.push(rect2);
+
+                let fade_color = d2d_color.with_alpha(self.config.city_rect_alpha);
+                operations.push(DrawOperation::filled_rect(rect1, fade_color));
+                operations.push(DrawOperation::filled_rect(rect2, fade_color));
             }
         }
 
-        // Draw fill rectangles
-        let fade_color = d2d_color.with_alpha(self.config.city_rect_alpha);
-        for rect in &rects_to_draw {
-            renderer.draw_filled_rect(rect, &fade_color)?;
-        }
-
-        // Draw the line
-        renderer.draw_line(screen_from, screen_to, &d2d_color, self.config.scale)?;
-
-        // Store in history for reverse animation
-        let branch_history = self
-            .painter_state
-            .draw_history
-            .entry(branch_id)
-            .or_default();
-
-        for rect in rects_to_draw {
-            branch_history.push(DrawOperation::filled_rect(rect, fade_color));
-        }
-        branch_history.push(DrawOperation::line(
+        // Add the line
+        operations.push(DrawOperation::line(
             screen_from,
             screen_to,
             d2d_color,
             self.config.scale,
         ));
 
-        Ok(())
+        (branch_id, operations)
     }
 
     /// Consolidate consecutive lines into polylines for more efficient rendering
@@ -987,30 +973,36 @@ impl Scene for CityGrowScene {
 
         // Separate events into non-main and main branch events for proper layering
         // Non-main branches are drawn first (appear below), main branches last (appear on top)
-        let mut non_main_events = Vec::new();
-        let mut main_events = Vec::new();
+        let mut non_main_operations = Vec::new();
+        let mut main_operations = Vec::new();
 
         for event in events {
-            let branch_id = match &event {
-                Event::Move { branch_id, .. } => *branch_id,
-                Event::BranchOff { child_id, .. } => *child_id,
-            };
+            let (branch_id, operations) = self.event_to_draw_operations(&event);
 
+            // Store in history for reverse animation
+            let branch_history = self
+                .painter_state
+                .draw_history
+                .entry(branch_id)
+                .or_default();
+            branch_history.extend(operations.iter().cloned());
+
+            // Separate by main/non-main for layering
             if self.painter_state.main_branches.contains(&branch_id) {
-                main_events.push(event);
+                main_operations.extend(operations);
             } else {
-                non_main_events.push(event);
+                non_main_operations.extend(operations);
             }
         }
 
-        // Draw non-main branches first (background)
-        for event in &non_main_events {
-            self.draw_move(renderer, event)?;
+        // Batch draw non-main branches first (background)
+        if !non_main_operations.is_empty() {
+            renderer.draw_batch(&non_main_operations)?;
         }
 
-        // Draw main branches last (foreground - on top)
-        for event in &main_events {
-            self.draw_move(renderer, event)?;
+        // Batch draw main branches last (foreground - on top)
+        if !main_operations.is_empty() {
+            renderer.draw_batch(&main_operations)?;
         }
 
         // Check if all branches are exhausted
