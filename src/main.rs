@@ -9,6 +9,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use window::Window;
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::Media::timeEndPeriod;
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
 use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
@@ -47,6 +48,15 @@ fn initialize_logging() -> WorkerGuard {
 }
 
 fn main() -> Result<()> {
+    // Enable per-monitor DPI awareness v2 (must be called before any windows are created)
+    // This prevents blurry rendering on high-DPI displays (4K monitors, etc.)
+    unsafe {
+        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
+            // On older Windows versions, this might fail - continue anyway
+            // The fallback behavior is acceptable (system DPI scaling)
+        }
+    }
+
     let _guard = initialize_logging();
     info!("Starting City Grow animation");
 
