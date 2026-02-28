@@ -4,9 +4,11 @@ use std::{env::current_exe, path::PathBuf};
 
 use anyhow::{Context, Result};
 use app::App;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use window::Window;
+use windows::Win32::Media::timeBeginPeriod;
+use windows::Win32::Media::timeEndPeriod;
 
 use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
@@ -48,6 +50,16 @@ fn main() -> Result<()> {
     let _guard = initialize_logging();
     info!("Starting City Grow animation");
 
+    // Enable high-precision timing (1ms resolution instead of 15-16ms)
+    // This significantly improves frame timing accuracy for smooth animation
+    unsafe {
+        if timeBeginPeriod(1) != 0 {
+            warn!("Failed to set high-precision timer, animation may be less smooth");
+        } else {
+            debug!("High-precision timer enabled (1ms resolution)");
+        }
+    }
+
     let scene = CityGrowScene::new(1920, 1080); // Initial size, will be updated on first resize
     let app = App::new(scene);
     let _window = Window::create(
@@ -63,6 +75,11 @@ fn main() -> Result<()> {
     debug!("Entering message loop");
     let result = Window::run_message_loop().context("Message loop failed");
     info!("Exiting");
+
+    // Restore normal timer resolution
+    unsafe {
+        let _ = timeEndPeriod(1);
+    }
 
     drop(_guard); // Keep guard alive by explicitly dropping it at the end
 
