@@ -1,4 +1,5 @@
 use crate::{
+    ext::color_ext::D2DColorExt,
     renderer::{Renderer, draw_operation::DrawOperation},
     scene::Scene,
 };
@@ -16,8 +17,6 @@ const LINE_WIDTH: f32 = 2.0;
 const LINE_OFFSET: f32 = LINE_WIDTH / 2.0;
 const MARGIN: f32 = LINE_WIDTH / 2.0;
 
-// Utility structs
-
 const POSITIONS: [Pos; 4] = [
     Pos { x: 1, y: 0 },  // East
     Pos { x: -1, y: 0 }, // West
@@ -27,7 +26,6 @@ const POSITIONS: [Pos; 4] = [
 
 enum Event {
     BranchOff {
-        parent_id: u32,
         child_id: u32,
         parent_pos: Pos,
         child_pos: Pos,
@@ -44,10 +42,9 @@ enum Event {
     },
 }
 
-/// Painter state tracks drawing history for each branch
 struct PainterState {
     draw_history: HashMap<u32, Vec<DrawOperation>>,
-    main_branches: HashSet<u32>, // Track which branches are main branches
+    main_branches: HashSet<u32>,
 }
 
 enum BranchOffResult {
@@ -112,6 +109,10 @@ impl Grid {
                     .take_if(|new_pos| self.get(new_pos.x as u32, new_pos.y as u32) == Some(false))
             })
             .collect()
+    }
+
+    fn is_position_valid(&self, pos: &Pos) -> bool {
+        pos.x >= 0 && pos.x < self.size_x as i32 && pos.y >= 0 && pos.y < self.size_y as i32
     }
 }
 
@@ -214,8 +215,8 @@ impl Default for CityGrowConfig {
         Self {
             life_time: 8000,
             life_time_branch: 15,
-            prop_city_to_land: 12.0,
-            prop_land_to_city: 0.003,
+            prop_city_to_land: 0.12,
+            prop_land_to_city: 0.03,
             prop_branch_off_city: 15.0,
             prop_branch_off_land: 6.0,
             prop_branch_off_to_main: 1.0,
@@ -321,7 +322,7 @@ impl Branch {
     }
 
     fn transition_modes(self, grid: &Grid, config: &CityGrowConfig, rng: &mut ThreadRng) -> Self {
-        if self.mode == BranchMode::City && rng.random::<f32>() < config.prop_city_to_land / 100.0 {
+        if self.mode == BranchMode::City && rng.random::<f32>() < config.prop_city_to_land {
             return Self {
                 expand_direction: self
                     .expand_direction(grid, rng)
@@ -329,9 +330,7 @@ impl Branch {
                 mode: BranchMode::Land,
                 ..self
             };
-        } else if self.mode == BranchMode::Land
-            && rng.random::<f32>() < config.prop_land_to_city / 100.0
-        {
+        } else if self.mode == BranchMode::Land && rng.random::<f32>() < config.prop_land_to_city {
             return Self {
                 mode: BranchMode::City,
                 age: rng.random_range(0..=self.age),
@@ -347,17 +346,22 @@ impl Branch {
             return None;
         }
         let target_position = available_neighbors[rng.random_range(0..available_neighbors.len())];
-        target_position.try_sub(self.pos)
+        target_position
+            .try_sub(self.pos)
+            .filter(|pos| grid.is_position_valid(pos))
     }
 
+    /// If no free neighbors, try backtracking up to max_steps_back to find a position with free neighbors.
+    /// If such a position is not found, return None to indicate the branch should die.
     fn set_next_position(self, grid: &Grid, config: &CityGrowConfig) -> Option<Self> {
         if grid.get_free_neighbors(self.pos).is_empty() {
-            let positions_to_search = (config.max_steps_back as usize).min(self.own_fields.len());
+            let num_positions_to_search =
+                (config.max_steps_back as usize).min(self.own_fields.len());
             let new_position = self
                 .own_fields
                 .iter()
                 .rev()
-                .take(positions_to_search)
+                .take(num_positions_to_search)
                 .find(|pos| !grid.get_free_neighbors(**pos).is_empty())
                 .copied();
             if let Some(new_pos) = new_position {
@@ -379,7 +383,10 @@ impl Branch {
     ) -> (Self, Pos) {
         let neighbors = grid.get_free_neighbors(self.pos);
         if self.mode == BranchMode::Land {
-            let preferred = self.pos.try_add(self.expand_direction);
+            let preferred = self
+                .pos
+                .try_add(self.expand_direction)
+                .filter(|pos| grid.is_position_valid(pos));
 
             if let Some(preferred) = preferred.filter(|p| neighbors.contains(p)) {
                 if rng.random_ratio(
@@ -423,9 +430,6 @@ impl Branch {
                 return BranchOffResult::Failure { branch: self };
             };
 
-        // Parent stays unchanged - child owns the new position
-        let new_parent = self;
-
         let child = Self {
             id: rng.random(),
             pos: selected_neighbor,
@@ -434,20 +438,19 @@ impl Branch {
             own_fields: vec![selected_neighbor],
             age: 0,
             life_time: config.life_time_branch,
-            color: Hsla::new(new_parent.color.h, 255, config.lightness_branch, 255),
+            color: Hsla::new(self.color.h, 255, config.lightness_branch, 255),
         };
 
         let branch_event = Event::BranchOff {
-            parent_id: new_parent.id,
             child_id: child.id,
             parent_pos: search_pos,
             child_pos: selected_neighbor,
-            parent_mode: new_parent.mode,
+            parent_mode: self.mode,
             child_color: child.color,
         };
 
         BranchOffResult::Success {
-            new_parent,
+            new_parent: self,
             child,
             pos: selected_neighbor,
             event: branch_event,
@@ -455,7 +458,6 @@ impl Branch {
     }
 }
 
-/// CityGrow scene - procedurally growing city visualization
 pub struct CityGrowScene {
     config: CityGrowConfig,
     grid: Grid,
@@ -516,7 +518,6 @@ impl CityGrowScene {
                 let pos = self.grid.random_pos(&mut self.rng);
                 let branch = Branch::new(pos, &self.config, &mut self.rng);
                 self.grid.set(pos.x as u32, pos.y as u32, true);
-                // All initial branches are main branches
                 self.painter_state.main_branches.insert(branch.id);
                 debug!("Branch initialized at ({}, {})", pos.x, pos.y);
                 branch
@@ -528,84 +529,94 @@ impl CityGrowScene {
     fn process_branching(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         let branch_count = self.branch_list.len();
+        let mut i = 0;
 
-        self.branch_list = self
-            .branch_list
-            .drain(..)
-            .flat_map(|branch| {
-                let scaled_chance = (self.config.branch_chance(branch.mode)
-                    * (1.0 + self.config.branch_fall_off)
-                    / (self.config.branch_fall_off + branch_count as f32))
-                    / 100.0;
+        while i < self.branch_list.len() {
+            let branch = self.branch_list.swap_remove(i);
+            let scaled_chance = (self.config.branch_chance(branch.mode)
+                * (1.0 + self.config.branch_fall_off)
+                / (self.config.branch_fall_off + branch_count as f32))
+                / 100.0;
 
-                if self.rng.random::<f32>() < scaled_chance {
-                    match branch.try_branch_off(&self.grid, &self.config, &mut self.rng) {
-                        BranchOffResult::Success {
-                            new_parent,
-                            child,
-                            pos,
-                            event,
-                        } => {
-                            self.grid.set(pos.x as u32, pos.y as u32, true);
-                            events.push(event);
+            if self.rng.random::<f32>() < scaled_chance {
+                match branch.try_branch_off(&self.grid, &self.config, &mut self.rng) {
+                    BranchOffResult::Success {
+                        new_parent,
+                        child,
+                        pos,
+                        event,
+                    } => {
+                        self.grid.set(pos.x as u32, pos.y as u32, true);
+                        events.push(event);
 
-                            let child = if self.rng.random::<f32>()
-                                < self.config.prop_branch_off_to_main / 100.0
-                            {
-                                let promoted_child = Branch {
-                                    color: Hsla::new(
-                                        ((child.color.h + self.config.change_hue_new_main) as u16
-                                            % 256) as u8,
-                                        255,
-                                        self.config.lightness_default,
-                                        255,
-                                    ),
-                                    life_time: self.config.life_time,
-                                    ..child
-                                };
-                                // Mark promoted child as main branch
-                                self.painter_state.main_branches.insert(promoted_child.id);
-                                promoted_child
-                            } else {
-                                child
+                        let child = if self.rng.random::<f32>()
+                            < self.config.prop_branch_off_to_main / 100.0
+                        {
+                            let promoted_child = Branch {
+                                color: Hsla::new(
+                                    ((child.color.h + self.config.change_hue_new_main) as u16 % 256)
+                                        as u8,
+                                    255,
+                                    self.config.lightness_default,
+                                    255,
+                                ),
+                                life_time: self.config.life_time,
+                                ..child
                             };
+                            self.painter_state.main_branches.insert(promoted_child.id);
+                            promoted_child
+                        } else {
+                            child
+                        };
 
-                            vec![new_parent, child]
-                        }
-                        BranchOffResult::Failure { branch } => vec![branch],
+                        self.branch_list.push(child);
+                        self.branch_list.push(new_parent);
+                        let last = self.branch_list.len() - 1;
+                        self.branch_list.swap(i, last);
+                        i += 1;
                     }
-                } else {
-                    vec![branch]
+                    BranchOffResult::Failure { branch } => {
+                        self.branch_list.push(branch);
+                        let last = self.branch_list.len() - 1;
+                        self.branch_list.swap(i, last);
+                        i += 1;
+                    }
                 }
-            })
-            .collect();
+            } else {
+                self.branch_list.push(branch);
+                let last = self.branch_list.len() - 1;
+                self.branch_list.swap(i, last);
+                i += 1;
+            }
+        }
+
         events
     }
 
     fn process_stepping(&mut self) -> Vec<Event> {
-        let mut events = Vec::new();
+        let mut events = Vec::with_capacity(self.branch_list.len());
+        let mut i = 0;
 
-        self.branch_list = self
-            .branch_list
-            .drain(..)
-            .filter_map(|branch| {
-                match branch.step_branch(&self.grid, &self.config, &mut self.rng) {
-                    Some((new_branch, pos, next_pos, own_fields_tip)) => {
-                        self.grid.set(next_pos.x as u32, next_pos.y as u32, true);
-                        events.push(Event::Move {
-                            branch_id: new_branch.id,
-                            from: pos,
-                            to: next_pos,
-                            mode: new_branch.mode,
-                            color: new_branch.color,
-                            own_fields_tip,
-                        });
-                        Some(new_branch)
-                    }
-                    None => None,
-                }
-            })
-            .collect();
+        while i < self.branch_list.len() {
+            let branch = self.branch_list.swap_remove(i);
+            if let Some((new_branch, pos, next_pos, own_fields_tip)) =
+                branch.step_branch(&self.grid, &self.config, &mut self.rng)
+            {
+                self.grid.set(next_pos.x as u32, next_pos.y as u32, true);
+                events.push(Event::Move {
+                    branch_id: new_branch.id,
+                    from: pos,
+                    to: next_pos,
+                    mode: new_branch.mode,
+                    color: new_branch.color,
+                    own_fields_tip,
+                });
+                self.branch_list.push(new_branch);
+                let last = self.branch_list.len() - 1;
+                self.branch_list.swap(i, last);
+                i += 1;
+            }
+        }
 
         events
     }
@@ -671,18 +682,14 @@ impl CityGrowScene {
                 child_pos,
                 parent_mode,
                 child_color,
-                ..
-            } => {
-                // Birth line uses parent's mode and fromPos = toPos (no backtracking yet)
-                (
-                    *child_id,
-                    *parent_pos,
-                    *child_pos,
-                    *parent_mode,
-                    *child_color,
-                    *parent_pos,
-                )
-            }
+            } => (
+                *child_id,
+                *parent_pos,
+                *child_pos,
+                *parent_mode,
+                *child_color,
+                *parent_pos,
+            ),
         };
 
         let screen_from = self.grid_to_screen(from_pos);
@@ -712,12 +719,7 @@ impl CityGrowScene {
         }
 
         // Draw fill rectangles
-        let fade_color = D2D1_COLOR_F {
-            r: d2d_color.r,
-            g: d2d_color.g,
-            b: d2d_color.b,
-            a: 0.25,
-        };
+        let fade_color = d2d_color.with_alpha(0.25);
         for rect in &rects_to_draw {
             renderer.draw_filled_rect(rect, &fade_color)?;
         }
@@ -745,41 +747,145 @@ impl CityGrowScene {
         Ok(())
     }
 
-    /// Erase a draw operation (for reverse animation)
-    fn erase_entry(&self, renderer: &Renderer, entry: &DrawOperation) -> Result<()> {
-        let black = D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 1.0,
-        };
+    /// Consolidate consecutive lines into polylines for more efficient rendering
+    fn consolidate_lines(operations: &[DrawOperation]) -> Vec<DrawOperation> {
+        if operations.is_empty() {
+            return Vec::new();
+        }
 
-        // Set MIN blend mode for pixel-perfect erasure
-        renderer.set_min_blend();
+        let mut result = Vec::new();
+        let mut current_polyline_points: Vec<Vector2> = Vec::new();
+        let mut current_thickness = 0.0;
 
-        match entry {
-            DrawOperation::FilledRect { rect, .. } => {
-                renderer.draw_filled_rect(rect, &black)?;
-            }
-            DrawOperation::Line {
-                start,
-                end,
-                thickness,
-                ..
-            } => {
-                renderer.draw_line(*start, *end, &black, *thickness)?;
-            }
-            DrawOperation::Rect {
-                rect, thickness, ..
-            } => {
-                renderer.draw_rect(rect, &black, *thickness)?;
-            }
-            DrawOperation::Polyline {
-                points, thickness, ..
-            } => {
-                renderer.draw_polyline(points, &black, *thickness)?;
+        for op in operations {
+            match op {
+                DrawOperation::Line {
+                    start,
+                    end,
+                    thickness,
+                    ..
+                } => {
+                    // Start new polyline or continue existing one
+                    if current_polyline_points.is_empty() {
+                        current_polyline_points.push(*start);
+                        current_polyline_points.push(*end);
+                        current_thickness = *thickness;
+                    } else if (current_polyline_points.last().unwrap().X - start.X).abs() < 0.01
+                        && (current_polyline_points.last().unwrap().Y - start.Y).abs() < 0.01
+                        && (current_thickness - thickness).abs() < 0.01
+                    {
+                        // Connected line with same thickness - add to polyline
+                        current_polyline_points.push(*end);
+                    } else {
+                        // Disconnected or different thickness - flush current polyline
+                        if current_polyline_points.len() > 2 {
+                            result.push(DrawOperation::Polyline {
+                                points: current_polyline_points.clone(),
+                                color: D2D1_COLOR_F {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 1.0,
+                                },
+                                thickness: current_thickness,
+                            });
+                        } else if current_polyline_points.len() == 2 {
+                            result.push(DrawOperation::Line {
+                                start: current_polyline_points[0],
+                                end: current_polyline_points[1],
+                                color: D2D1_COLOR_F {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 1.0,
+                                },
+                                thickness: current_thickness,
+                            });
+                        }
+                        current_polyline_points.clear();
+                        current_polyline_points.push(*start);
+                        current_polyline_points.push(*end);
+                        current_thickness = *thickness;
+                    }
+                }
+                _ => {
+                    // Non-line operation - flush current polyline and add operation
+                    if current_polyline_points.len() > 2 {
+                        result.push(DrawOperation::Polyline {
+                            points: current_polyline_points.clone(),
+                            color: D2D1_COLOR_F::black(),
+                            thickness: current_thickness,
+                        });
+                    } else if current_polyline_points.len() == 2 {
+                        result.push(DrawOperation::Line {
+                            start: current_polyline_points[0],
+                            end: current_polyline_points[1],
+                            color: D2D1_COLOR_F::black(),
+                            thickness: current_thickness,
+                        });
+                    }
+                    current_polyline_points.clear();
+
+                    // Convert operation to black version for erasure
+                    let black_op = match op {
+                        DrawOperation::FilledRect { rect, .. } => DrawOperation::FilledRect {
+                            rect: *rect,
+                            color: D2D1_COLOR_F::black(),
+                        },
+                        DrawOperation::Rect {
+                            rect, thickness, ..
+                        } => DrawOperation::Rect {
+                            rect: *rect,
+                            color: D2D1_COLOR_F::black(),
+                            thickness: *thickness,
+                        },
+                        DrawOperation::Polyline {
+                            points, thickness, ..
+                        } => DrawOperation::Polyline {
+                            points: points.clone(),
+                            color: D2D1_COLOR_F::black(),
+                            thickness: *thickness,
+                        },
+                        _ => continue,
+                    };
+                    result.push(black_op);
+                }
             }
         }
+
+        // Flush remaining polyline
+        if current_polyline_points.len() > 2 {
+            result.push(DrawOperation::Polyline {
+                points: current_polyline_points,
+                color: D2D1_COLOR_F::black(),
+                thickness: current_thickness,
+            });
+        } else if current_polyline_points.len() == 2 {
+            result.push(DrawOperation::Line {
+                start: current_polyline_points[0],
+                end: current_polyline_points[1],
+                color: D2D1_COLOR_F::black(),
+                thickness: current_thickness,
+            });
+        }
+
+        result
+    }
+
+    /// Batch erase operations in MIN blend mode for efficiency
+    fn batch_erase(&self, renderer: &Renderer, operations: &[DrawOperation]) -> Result<()> {
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        // Consolidate consecutive lines into polylines
+        let optimized_ops = Self::consolidate_lines(operations);
+
+        // Set MIN blend mode once for all operations
+        renderer.set_min_blend();
+
+        // Use batch drawing for efficiency
+        renderer.draw_batch(&optimized_ops)?;
 
         // Restore normal blend mode
         renderer.set_normal_blend();
@@ -837,10 +943,9 @@ impl CityGrowScene {
             }
         }
 
-        // Erase all entries (now we only have immutable self reference)
-        for entry in all_entries_to_erase.iter().rev() {
-            self.erase_entry(renderer, entry)?;
-        }
+        // Batch erase all entries efficiently (consolidates lines into polylines)
+        let entries_to_erase: Vec<DrawOperation> = all_entries_to_erase.into_iter().rev().collect();
+        self.batch_erase(renderer, &entries_to_erase)?;
 
         // Remove empty branches
         for branch_id in branches_to_remove {
@@ -865,12 +970,7 @@ impl Scene for CityGrowScene {
     fn render(&mut self, renderer: &mut Renderer, _delta_time: f32) -> Result<()> {
         // Clear background to black only once at start
         if self.needs_initial_clear {
-            renderer.clear(D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            });
+            renderer.clear(D2D1_COLOR_F::black());
             self.needs_initial_clear = false;
         }
 

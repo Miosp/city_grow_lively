@@ -12,6 +12,7 @@ use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
 mod app;
 mod city_grow;
+mod ext;
 mod renderer;
 mod scene;
 mod window;
