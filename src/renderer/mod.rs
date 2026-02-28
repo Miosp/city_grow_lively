@@ -26,8 +26,8 @@ use windows::{
                 D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
             },
             Direct3D11::{
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
-                ID3D11Device, ID3D11DeviceContext,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
+                D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
             },
             DirectComposition::{
                 DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget,
@@ -160,13 +160,20 @@ impl Renderer {
             let mut context: Option<ID3D11DeviceContext> = None;
             let mut feature_level: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL_11_0;
 
+            // Enable debug layer in debug builds for better validation and error messages
+            let mut device_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            if cfg!(debug_assertions) {
+                device_flags |= D3D11_CREATE_DEVICE_DEBUG;
+                debug!("D3D11 debug layer enabled");
+            }
+
             // Try feature levels in descending order: 11.1, 11.0, 10.1, 10.0
             // This provides broader hardware compatibility
             D3D11CreateDevice(
                 &adapter,
                 D3D_DRIVER_TYPE_UNKNOWN, // Must use UNKNOWN when providing an adapter
                 Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                device_flags,
                 Some(&[
                     D3D_FEATURE_LEVEL_11_1,
                     D3D_FEATURE_LEVEL_11_0,
