@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
+use tracing::{debug, info};
 use windows::{
     Win32::{
         Foundation::HWND,
@@ -20,7 +21,7 @@ use windows::{
                 ID2D1Bitmap1, ID2D1CommandList, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
                 ID2D1Geometry, ID2D1RectangleGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
             },
-            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0},
+            Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
             Direct3D11::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
                 ID3D11Device, ID3D11DeviceContext,
@@ -39,10 +40,10 @@ use windows::{
                 Common::{
                     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
                 },
-                DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT,
-                DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISurface,
-                IDXGISwapChain1,
+                CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_DEVICE_REMOVED,
+                DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+                DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1,
+                IDXGIDevice, IDXGIFactory1, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
             },
         },
     },
@@ -89,16 +90,75 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Select the best adapter for wallpaper rendering (prefer integrated GPU for power efficiency)
+    fn select_adapter() -> Result<IDXGIAdapter1> {
+        unsafe {
+            let dxgi_factory: IDXGIFactory1 = CreateDXGIFactory1()
+                .context("Failed to create DXGI factory for adapter enumeration")?;
+
+            let mut selected_adapter: Option<IDXGIAdapter1> = None;
+            let mut adapter_index = 0;
+
+            // Enumerate all adapters
+            while let Ok(adapter) = dxgi_factory.EnumAdapters1(adapter_index) {
+                let desc = adapter
+                    .GetDesc1()
+                    .context("Failed to get adapter description")?;
+
+                // Skip software adapters
+                if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                    adapter_index += 1;
+                    continue;
+                }
+
+                let adapter_name = String::from_utf16_lossy(&desc.Description);
+                let adapter_name = adapter_name.trim_end_matches('\0');
+                let dedicated_video_memory_mb = desc.DedicatedVideoMemory / (1024 * 1024);
+
+                debug!(
+                    "Found adapter {}: {} ({} MB VRAM)",
+                    adapter_index, adapter_name, dedicated_video_memory_mb
+                );
+
+                // For wallpaper use, prefer integrated GPU (lower power consumption)
+                // Integrated GPUs typically have less dedicated video memory
+                // Select the first non-software adapter, preferring ones with less VRAM
+                if selected_adapter.is_none() {
+                    selected_adapter = Some(adapter.clone());
+                } else if dedicated_video_memory_mb < 1024 {
+                    // If this looks like an integrated GPU (< 1GB dedicated VRAM),
+                    // prefer it over discrete GPUs
+                    info!(
+                        "Preferring integrated GPU for power efficiency: {}",
+                        adapter_name
+                    );
+                    selected_adapter = Some(adapter.clone());
+                }
+
+                adapter_index += 1;
+            }
+
+            selected_adapter.context("No suitable graphics adapter found")
+        }
+    }
+
     /// Create a new renderer for the given window with specific dimensions
     pub fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
         unsafe {
-            // Step 1: Create D3D11 device (Direct2D requires this)
+            // Step 1: Select best adapter for wallpaper use
+            let adapter = Self::select_adapter()?;
+            let desc = adapter.GetDesc1()?;
+            let adapter_name = String::from_utf16_lossy(&desc.Description);
+            let adapter_name = adapter_name.trim_end_matches('\0');
+            info!("Using GPU adapter: {}", adapter_name);
+
+            // Step 2: Create D3D11 device (Direct2D requires this)
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
 
             D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
+                &adapter,
+                D3D_DRIVER_TYPE_UNKNOWN, // Must use UNKNOWN when providing an adapter
                 Default::default(),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 Some(&[D3D_FEATURE_LEVEL_11_0]),
@@ -112,34 +172,34 @@ impl Renderer {
             let d3d_device = device.context("D3D11 device is None")?;
             let d3d_context = context.context("D3D11 context is None")?;
 
-            // Step 2: Get DXGI device
+            // Step 3: Get DXGI device
             let dxgi_device: IDXGIDevice = d3d_device
                 .cast::<IDXGIDevice>()
                 .context("Failed to get IDXGIDevice from D3D11 device")?;
 
-            // Step 3: Create Direct2D factory
+            // Step 4: Create Direct2D factory
             let d2d_factory: ID2D1Factory1 =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
                     .context("Failed to create Direct2D factory")?;
 
-            // Step 4: Create Direct2D device
+            // Step 5: Create Direct2D device
             let d2d_device: ID2D1Device = d2d_factory
                 .CreateDevice(&dxgi_device)
                 .context("Failed to create Direct2D device")?;
 
-            // Step 5: Create Direct2D device context
+            // Step 6: Create Direct2D device context
             let d2d_context: ID2D1DeviceContext = d2d_device
                 .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
                 .context("Failed to create Direct2D device context")?;
 
-            // Step 6: Get DXGI adapter and factory
+            // Step 7: Get DXGI adapter and factory
             let adapter = dxgi_device
                 .GetAdapter()
                 .context("Failed to get DXGI adapter")?;
             let factory: IDXGIFactory2 =
                 adapter.GetParent().context("Failed to get DXGI factory")?;
 
-            // Step 7: Create composition swap chain
+            // Step 8: Create composition swap chain
             let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -161,7 +221,7 @@ impl Renderer {
                 .CreateSwapChainForComposition(&dxgi_device, &swap_chain_desc, None)
                 .context("Failed to create composition swap chain")?;
 
-            // Step 8: Create Direct2D bitmap from swap chain buffer
+            // Step 9: Create Direct2D bitmap from swap chain buffer
             let dxgi_surface: IDXGISurface = swap_chain
                 .GetBuffer(0)
                 .context("Failed to get swap chain buffer")?;
@@ -184,25 +244,25 @@ impl Renderer {
             // Set the swap chain bitmap as the initial render target
             d2d_context.SetTarget(&d2d_bitmap);
 
-            // Step 9: Create DirectWrite factory
+            // Step 10: Create DirectWrite factory
             let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
                 .context("Failed to create DirectWrite factory")?;
 
-            // Step 10: Create DirectComposition device
+            // Step 11: Create DirectComposition device
             let composition_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)
                 .context("Failed to create DirectComposition device")?;
 
-            // Step 11: Create composition target
+            // Step 12: Create composition target
             let composition_target: IDCompositionTarget = composition_device
                 .CreateTargetForHwnd(hwnd, true)
                 .context("Failed to create composition target")?;
 
-            // Step 12: Create composition visual
+            // Step 13: Create composition visual
             let composition_visual: IDCompositionVisual = composition_device
                 .CreateVisual()
                 .context("Failed to create composition visual")?;
 
-            // Step 13: Wire up composition tree
+            // Step 14: Wire up composition tree
             composition_visual
                 .SetContent(&swap_chain)
                 .context("Failed to set swap chain as visual content")?;
@@ -215,7 +275,7 @@ impl Renderer {
                 .Commit()
                 .context("Failed to commit composition changes")?;
 
-            // Step 14: Create stroke style with flat caps for pixel-perfect lines
+            // Step 15: Create stroke style with flat caps for pixel-perfect lines
             let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
                 startCap: D2D1_CAP_STYLE_FLAT,
                 endCap: D2D1_CAP_STYLE_FLAT,

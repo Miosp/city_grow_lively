@@ -9,7 +9,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 use window::Window;
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::Media::timeEndPeriod;
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 
 use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
