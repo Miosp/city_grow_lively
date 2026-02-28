@@ -34,7 +34,8 @@ impl<S: Scene> App<S> {
             return true;
         }
 
-        match Renderer::new(hwnd, width, height) {
+        match Renderer::new(hwnd, width, height, true) {
+            // Enable vsync for smooth wallpaper rendering
             Ok(renderer) => {
                 debug!(
                     "Renderer initialized successfully with size {}x{}",

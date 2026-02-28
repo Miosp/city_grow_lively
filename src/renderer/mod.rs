@@ -87,6 +87,9 @@ pub struct Renderer {
     // Stroke style with flat caps (no rounded endpoints)
     flat_cap_stroke_style: ID2D1StrokeStyle,
 
+    // Rendering configuration
+    sync_interval: u32, // 0 = no vsync, 1 = vsync enabled
+
     // Metadata
     width: u32,
     height: u32,
@@ -146,7 +149,13 @@ impl Renderer {
     }
 
     /// Create a new renderer for the given window with specific dimensions
-    pub fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
+    ///
+    /// # Arguments
+    /// * `hwnd` - Window handle
+    /// * `width` - Initial width
+    /// * `height` - Initial height
+    /// * `enable_vsync` - Enable vsync (true = lock to display refresh rate, false = unlocked)
+    pub fn new(hwnd: HWND, width: u32, height: u32, enable_vsync: bool) -> Result<Self> {
         unsafe {
             // Step 1: Select best adapter for wallpaper use
             let adapter = Self::select_adapter()?;
@@ -313,6 +322,14 @@ impl Renderer {
             let flat_cap_stroke_style: ID2D1StrokeStyle =
                 d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into();
 
+            let sync_interval = if enable_vsync {
+                debug!("VSync enabled (sync_interval = 1)");
+                1
+            } else {
+                debug!("VSync disabled (sync_interval = 0) for maximum frame rate");
+                0
+            };
+
             Ok(Self {
                 d3d_device,
                 _d3d_context: d3d_context,
@@ -329,6 +346,7 @@ impl Renderer {
                 _composition_visual: composition_visual,
                 brush_cache: RefCell::new(HashMap::new()),
                 flat_cap_stroke_style,
+                sync_interval,
                 width,
                 height,
             })
@@ -586,8 +604,8 @@ impl Renderer {
         }
 
         unsafe {
-            // Present to screen
-            let present_hr = self.swap_chain.Present(1, DXGI_PRESENT(0));
+            // Present to screen with configured vsync setting
+            let present_hr = self.swap_chain.Present(self.sync_interval, DXGI_PRESENT(0));
 
             // Check for device loss errors
             if present_hr.is_err() {
