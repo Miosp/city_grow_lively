@@ -53,6 +53,7 @@ fn main() -> Result<()> {
         WindowConfigBuilder::default()
             .title("City Grow".to_string())
             .fullscreen(true) // Borderless fullscreen for Lively wallpaper
+            .target_framerate(60)
             .build()?,
         app,
     )

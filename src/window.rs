@@ -1,3 +1,5 @@
+use std::u32;
+
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -13,19 +15,18 @@ use windows::{
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("CityGrowWindow");
 const DEFAULT_TIMER_ID: usize = 1;
-const DEFAULT_FRAME_INTERVAL_MS: u32 = 16; // ~60fps
 const DEFAULT_WINDOW_WIDTH: u32 = 1280;
 const DEFAULT_WINDOW_HEIGHT: u32 = 720;
 
 /// Extract low-order word from LPARAM
 #[inline]
-fn loword(lparam: LPARAM) -> u16 {
+const fn loword(lparam: LPARAM) -> u16 {
     (lparam.0 & 0xFFFF) as u16
 }
 
 /// Extract high-order word from LPARAM
 #[inline]
-fn hiword(lparam: LPARAM) -> u16 {
+const fn hiword(lparam: LPARAM) -> u16 {
     ((lparam.0 >> 16) & 0xFFFF) as u16
 }
 
@@ -39,6 +40,8 @@ pub struct WindowConfig {
     pub width: Option<u32>,
     #[builder(default = None)]
     pub height: Option<u32>,
+    #[builder(default = 60)]
+    pub target_framerate: u32,
 }
 
 /// Trait for handling window events
@@ -170,7 +173,7 @@ impl Window {
             SetTimer(
                 Some(hwnd),
                 DEFAULT_TIMER_ID,
-                DEFAULT_FRAME_INTERVAL_MS,
+                framerate_to_interval_ms(config.target_framerate),
                 None,
             );
 
@@ -251,4 +254,8 @@ impl Window {
             _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
+}
+
+const fn framerate_to_interval_ms(fps: u32) -> u32 {
+    if fps == 0 { u32::MAX } else { 1000 / fps }
 }

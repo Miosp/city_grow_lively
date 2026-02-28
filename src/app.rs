@@ -61,15 +61,12 @@ impl<S: Scene> App<S> {
         let delta = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
 
-        // Update scene
-        self.scene.update(delta);
-
         // Prepare renderer (must be before begin_draw)
         self.scene.prepare_render(renderer)?;
 
         // Render
         renderer.begin_draw();
-        self.scene.render(renderer)?;
+        self.scene.render(renderer, delta)?;
         renderer.end_draw()?;
 
         self.frame_count += 1;
