@@ -89,6 +89,14 @@ fn handle_destroy<H: WindowHandler>(handler: &mut H, handler_ptr: *mut H) -> LRE
     }
     LRESULT(0)
 }
+
+/// Handle WM_CLOSE message
+fn handle_close(hwnd: HWND) -> LRESULT {
+    unsafe {
+        DestroyWindow(hwnd).ok();
+    }
+    LRESULT(0)
+}
 /// Window wrapper that manages Win32 window lifecycle
 #[allow(dead_code)]
 pub struct Window {
@@ -250,7 +258,7 @@ impl Window {
             WM_TIMER => handle_timer(handler, hwnd),
             WM_SIZE => handle_size(handler, hwnd, lparam),
             WM_DESTROY => handle_destroy(handler, handler_ptr),
-            WM_CLOSE => LRESULT(0), // Let host handle lifecycle
+            WM_CLOSE => handle_close(hwnd),
             _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
