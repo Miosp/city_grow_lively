@@ -36,3 +36,11 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
 ]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+debug = false
