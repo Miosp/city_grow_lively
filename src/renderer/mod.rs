@@ -10,16 +10,15 @@ use windows::{
             Direct2D::{
                 Common::{
                     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-                    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING,
-                    D2D1_PIXEL_FORMAT,
+                    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                 D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_FLAT,
                 D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
                 D2D1_PRIMITIVE_BLEND_MIN, D2D1_PRIMITIVE_BLEND_SOURCE_OVER,
                 D2D1_STROKE_STYLE_PROPERTIES1, D2D1CreateFactory, ID2D1Bitmap1, ID2D1CommandList,
-                ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry,
-                ID2D1RectangleGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+                ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+                ID2D1StrokeStyle,
             },
             Direct3D::{
                 D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
@@ -59,6 +58,7 @@ use crate::renderer::draw_operation::DrawOperation;
 pub mod draw_operation;
 
 /// Low-level rendering backend using Direct2D + DirectComposition
+#[allow(dead_code)]
 pub struct Renderer {
     // Direct3D11 (foundation for Direct2D)
     d3d_device: ID3D11Device,
@@ -99,6 +99,7 @@ pub struct Renderer {
     height: u32,
 }
 
+#[allow(dead_code)]
 impl Renderer {
     /// Select the best adapter for wallpaper rendering (prefer integrated GPU for power efficiency)
     fn select_adapter() -> Result<IDXGIAdapter1> {

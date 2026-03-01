@@ -7,6 +7,7 @@ use anyhow::Result;
 use bitvec::vec::BitVec;
 use rand::rngs::ThreadRng;
 use rand::{RngExt, seq::IndexedRandom};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
@@ -186,7 +187,8 @@ impl Pos {
     }
 }
 
-pub struct CityGrowConfig {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CityGrowSceneConfig {
     pub life_time: u16,
     pub life_time_branch: u16,
     pub prop_city_to_land: f32,
@@ -208,7 +210,7 @@ pub struct CityGrowConfig {
     pub land_directional_bias: f32,
 }
 
-impl Default for CityGrowConfig {
+impl Default for CityGrowSceneConfig {
     fn default() -> Self {
         Self {
             life_time: 8000,
@@ -234,7 +236,7 @@ impl Default for CityGrowConfig {
     }
 }
 
-impl CityGrowConfig {
+impl CityGrowSceneConfig {
     pub fn branch_chance(&self, mode: BranchMode) -> f32 {
         match mode {
             BranchMode::City => self.prop_branch_off_city,
@@ -264,7 +266,7 @@ struct Branch {
 }
 
 impl Branch {
-    fn new(pos: Pos, config: &CityGrowConfig, rng: &mut ThreadRng) -> Self {
+    fn new(pos: Pos, config: &CityGrowSceneConfig, rng: &mut ThreadRng) -> Self {
         let hue: u8 = rng.random_range(0..=255);
 
         // Pre-calculate colors
@@ -285,7 +287,7 @@ impl Branch {
     pub fn step_branch(
         self,
         grid: &Grid,
-        config: &CityGrowConfig,
+        config: &CityGrowSceneConfig,
         rng: &mut ThreadRng,
     ) -> Option<(Branch, Pos, Pos, Pos)> {
         if self.age >= self.life_time {
@@ -322,7 +324,12 @@ impl Branch {
         Some((new_branch, pos, next_move, own_fields_tip))
     }
 
-    fn transition_modes(self, grid: &Grid, config: &CityGrowConfig, rng: &mut ThreadRng) -> Self {
+    fn transition_modes(
+        self,
+        grid: &Grid,
+        config: &CityGrowSceneConfig,
+        rng: &mut ThreadRng,
+    ) -> Self {
         if self.mode == BranchMode::City && rng.random::<f32>() < config.prop_city_to_land {
             return Self {
                 expand_direction: self
@@ -354,7 +361,7 @@ impl Branch {
 
     /// If no free neighbors, try backtracking up to max_steps_back to find a position with free neighbors.
     /// If such a position is not found, return None to indicate the branch should die.
-    fn set_next_position(self, grid: &Grid, config: &CityGrowConfig) -> Option<Self> {
+    fn set_next_position(self, grid: &Grid, config: &CityGrowSceneConfig) -> Option<Self> {
         if grid.get_free_neighbors(self.pos).is_empty() {
             let num_positions_to_search =
                 (config.max_steps_back as usize).min(self.own_fields.len());
@@ -379,7 +386,7 @@ impl Branch {
     fn find_next_move(
         self,
         grid: &Grid,
-        config: &CityGrowConfig,
+        config: &CityGrowSceneConfig,
         rng: &mut ThreadRng,
     ) -> (Self, Pos) {
         let neighbors = grid.get_free_neighbors(self.pos);
@@ -417,7 +424,7 @@ impl Branch {
     fn try_branch_off(
         self,
         grid: &Grid,
-        config: &CityGrowConfig,
+        config: &CityGrowSceneConfig,
         rng: &mut ThreadRng,
     ) -> BranchOffResult {
         if self.own_fields.len() <= 1 {
@@ -465,7 +472,7 @@ impl Branch {
 }
 
 pub struct CityGrowScene {
-    config: CityGrowConfig,
+    config: CityGrowSceneConfig,
     grid: Grid,
     branch_list: Vec<Branch>,
     reverse_running: bool,
@@ -479,11 +486,7 @@ pub struct CityGrowScene {
 }
 
 impl CityGrowScene {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self::with_config(width, height, CityGrowConfig::default())
-    }
-
-    pub fn with_config(width: u32, height: u32, config: CityGrowConfig) -> Self {
+    pub fn with_config(width: u32, height: u32, config: CityGrowSceneConfig) -> Self {
         let cell_count_x = (width as f32 / config.scale / 2.0).round() as u32;
         let cell_count_y = (height as f32 / config.scale / 2.0).round() as u32;
 

@@ -161,7 +161,7 @@ impl<S: Scene> WindowHandler for App<S> {
         if !self.window_shown {
             unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, ShowWindow};
-                ShowWindow(hwnd, SW_SHOW);
+                let _ = ShowWindow(hwnd, SW_SHOW);
             }
             self.window_shown = true;
             debug!("Window shown after initial resize");

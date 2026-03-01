@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+use std::path::Path;
 use std::{env::current_exe, path::PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,23 +14,19 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
+use crate::config::CityGrowConfig;
 use crate::{city_grow::CityGrowScene, window::WindowConfigBuilder};
 
 mod app;
 mod city_grow;
+mod config;
 mod ext;
 mod renderer;
 mod scene;
 mod window;
 
-fn initialize_logging() -> WorkerGuard {
-    // Get log path next to the executable
-    let log_dir = current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let file_appender = tracing_appender::rolling::never(&log_dir, "city_grow.log");
+fn initialize_logging(level: tracing::Level, log_dir: &Path) -> WorkerGuard {
+    let file_appender = tracing_appender::rolling::never(log_dir, "city_grow.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
@@ -38,7 +35,7 @@ fn initialize_logging() -> WorkerGuard {
         .with_target(false)
         .with_level(true)
         .with_line_number(true)
-        // .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(level)
         .init();
 
     debug!(
@@ -50,6 +47,10 @@ fn initialize_logging() -> WorkerGuard {
 }
 
 fn main() -> Result<()> {
+    let app_dir = current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
     // Enable per-monitor DPI awareness v2 (must be called before any windows are created)
     // This prevents blurry rendering on high-DPI displays (4K monitors, etc.)
     unsafe {
@@ -59,7 +60,13 @@ fn main() -> Result<()> {
         }
     }
 
-    let _guard = initialize_logging();
+    if !CityGrowConfig::exists(&app_dir) {
+        CityGrowConfig::write_default(&app_dir).context("Failed to write default config")?;
+    }
+
+    let config = CityGrowConfig::load_config(&app_dir).context("Failed to load config")?;
+
+    let _guard = initialize_logging(config.app.log_level.into(), &app_dir);
     info!("Starting City Grow animation");
 
     // Enable high-precision timing (1ms resolution instead of 15-16ms)
@@ -72,13 +79,17 @@ fn main() -> Result<()> {
         }
     }
 
-    let scene = CityGrowScene::new(1920, 1080); // Initial size, will be updated on first resize
+    let scene = CityGrowScene::with_config(
+        config.app.default_width,
+        config.app.default_height,
+        config.scene,
+    ); // Initial size, will be updated on first resize
     let app = App::new(scene);
     let _window = Window::create(
         WindowConfigBuilder::default()
             .title("City Grow".to_string())
             .fullscreen(true) // Borderless fullscreen for Lively wallpaper
-            .target_framerate(60)
+            .target_framerate(config.app.framerate)
             .build()?,
         app,
     )

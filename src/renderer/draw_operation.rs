@@ -3,6 +3,7 @@ use windows_numerics::Vector2;
 
 /// Batch drawing operation
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum DrawOperation {
     Line {
         start: Vector2,
@@ -26,6 +27,7 @@ pub enum DrawOperation {
     },
 }
 
+#[allow(dead_code)]
 impl DrawOperation {
     /// Create a line drawing operation
     pub fn line(start: Vector2, end: Vector2, color: D2D1_COLOR_F, thickness: f32) -> Self {

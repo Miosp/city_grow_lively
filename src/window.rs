@@ -1,5 +1,3 @@
-use std::u32;
-
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -92,10 +90,12 @@ fn handle_destroy<H: WindowHandler>(handler: &mut H, handler_ptr: *mut H) -> LRE
     LRESULT(0)
 }
 /// Window wrapper that manages Win32 window lifecycle
+#[allow(dead_code)]
 pub struct Window {
     hwnd: HWND,
 }
 
+#[allow(dead_code)]
 impl Window {
     /// Create a new window with the given configuration and handler
     pub fn create<H: WindowHandler + 'static>(config: WindowConfig, handler: H) -> Result<Self> {
